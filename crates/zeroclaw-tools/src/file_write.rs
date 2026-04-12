@@ -124,6 +124,17 @@ impl Tool for FileWriteTool {
 
         let resolved_target = resolved_parent.join(file_name);
 
+        if self.security.is_runtime_config_path(&resolved_target) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    self.security
+                        .runtime_config_violation_message(&resolved_target),
+                ),
+            });
+        }
+
         // If the target already exists and is a symlink, refuse to follow it
         if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await
             && meta.file_type().is_symlink()

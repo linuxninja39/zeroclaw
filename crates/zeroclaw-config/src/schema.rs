@@ -16578,6 +16578,48 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
     }
 
     #[test]
+    async fn vec_string_props_are_exposed_and_settable() {
+        let mut config = Config::default();
+        let fields = config.prop_fields();
+        let allowed_roots = fields
+            .iter()
+            .find(|f| f.name == "autonomy.allowed-roots")
+            .expect("autonomy.allowed-roots should be exposed via props");
+        let allowed_commands = fields
+            .iter()
+            .find(|f| f.name == "autonomy.allowed-commands")
+            .expect("autonomy.allowed-commands should be exposed via props");
+
+        assert_eq!(allowed_roots.type_hint, "Vec<String>");
+        assert_eq!(allowed_roots.display_value, "[]");
+        assert_eq!(allowed_commands.type_hint, "Vec<String>");
+        assert!(allowed_commands.display_value.starts_with("["));
+
+        config
+            .set_prop(
+                "autonomy.allowed-roots",
+                "['/home/jacob/Projects', '/home/jacob/.zeroclaw']",
+            )
+            .unwrap();
+        assert_eq!(
+            config.autonomy.allowed_roots,
+            vec![
+                "/home/jacob/Projects".to_string(),
+                "/home/jacob/.zeroclaw".to_string(),
+            ]
+        );
+
+        let rendered = config.get_prop("autonomy.allowed-roots").unwrap();
+        assert!(rendered.contains("/home/jacob/Projects"));
+        assert!(rendered.contains("/home/jacob/.zeroclaw"));
+
+        let err = config
+            .set_prop("autonomy.allowed-roots", "not-an-array")
+            .unwrap_err();
+        assert!(err.to_string().contains("array of strings"));
+    }
+
+    #[test]
     async fn prop_is_secret_static_check() {
         assert!(MatrixConfig::prop_is_secret("channels.matrix.access-token"));
         assert!(MatrixConfig::prop_is_secret("channels.matrix.recovery-key"));

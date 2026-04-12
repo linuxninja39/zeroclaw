@@ -4,16 +4,37 @@ use syn::{
     Data, DeriveInput, Fields, GenericArgument, Lit, Meta, PathArguments, parse_macro_input,
 };
 
-/// Check if a type is a known compound container (Vec, HashMap, etc.)
-/// that should be skipped from property enumeration.
+/// Check if a type is a known compound container that should be skipped from
+/// property enumeration. `Vec<String>` is treated as a supported list prop.
 fn is_compound_type(ty: &syn::Type) -> bool {
     let syn::Type::Path(type_path) = ty else {
         return false;
     };
-    let Some(ident) = type_path.path.segments.last().map(|s| &s.ident) else {
+    let Some(segment) = type_path.path.segments.last() else {
         return false;
     };
-    ident == "Vec" || ident == "HashMap" || ident == "PathBuf"
+
+    if segment.ident == "Vec" {
+        let PathArguments::AngleBracketed(args) = &segment.arguments else {
+            return true;
+        };
+        let inner = args.args.iter().find_map(|arg| {
+            if let GenericArgument::Type(ty) = arg {
+                Some(ty)
+            } else {
+                None
+            }
+        });
+        let is_vec_string = inner
+            .and_then(|ty| match ty {
+                syn::Type::Path(inner_path) => inner_path.path.segments.last(),
+                _ => None,
+            })
+            .is_some_and(|inner_segment| inner_segment.ident == "String");
+        return !is_vec_string;
+    }
+
+    segment.ident == "HashMap" || segment.ident == "PathBuf"
 }
 
 /// Check if any `#[serde(...)]` attribute on the field contains `skip`.
@@ -380,7 +401,8 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
         let is_option = is_option_type(&field.ty);
         let inner_ty = extract_option_inner(&field.ty).unwrap_or(&field.ty);
 
-        // Skip compound types (Vec, HashMap, PathBuf)
+        // Skip unsupported compound types. `Vec<String>` is allowed and
+        // exposed as a string-list property.
         if is_compound_type(inner_ty) {
             continue;
         }
