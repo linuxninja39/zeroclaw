@@ -16,6 +16,8 @@ pub enum PropKind {
     Bool,
     Integer,
     Float,
+    /// A TOML array of strings (for example `["a", "b"]`).
+    StringList,
     /// An enum or other serde-serializable type (parsed as TOML string).
     Enum,
 }
@@ -36,6 +38,7 @@ macro_rules! impl_prop_kind {
 impl_prop_kind!(PropKind::Bool, bool);
 impl_prop_kind!(PropKind::String, String);
 impl_prop_kind!(PropKind::Float, f64, f32);
+impl_prop_kind!(PropKind::StringList, Vec<String>);
 impl_prop_kind!(
     PropKind::Integer,
     u8,

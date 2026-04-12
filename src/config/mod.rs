@@ -188,6 +188,21 @@ fn parse_prop_value(value_str: &str, kind: PropKind) -> anyhow::Result<toml::Val
                 anyhow::anyhow!("Invalid float value '{value_str}'")
             })?))
         }
+        PropKind::StringList => {
+            let parsed: toml::Value = value_str.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid string-list value '{value_str}' — expected TOML array syntax like ['a', 'b']"
+                )
+            })?;
+            match parsed {
+                toml::Value::Array(items) if items.iter().all(|item| matches!(item, toml::Value::String(_))) => {
+                    Ok(toml::Value::Array(items))
+                }
+                _ => anyhow::bail!(
+                    "Invalid string-list value '{value_str}' — expected TOML array of strings like ['a', 'b']"
+                ),
+            }
+        }
         PropKind::String | PropKind::Enum => Ok(toml::Value::String(value_str.to_string())),
     }
 }
