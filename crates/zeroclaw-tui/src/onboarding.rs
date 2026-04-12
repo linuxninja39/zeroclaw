@@ -746,6 +746,7 @@ fn apply_tui_selections_to_config(app: &App, config: &mut Config) {
                     interrupt_on_new_message: false,
                     mention_only: false,
                     ack_reactions: None,
+                    direct_chat_reply_intent_precheck: true,
                     proxy_url: None,
                 });
             }
@@ -3467,6 +3468,7 @@ mod tests {
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
         apply_tui_selections_to_config(&app, &mut config);

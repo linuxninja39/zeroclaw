@@ -1047,6 +1047,7 @@ mod tests {
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
         assert!(has_supervised_channels(&config));
@@ -1178,6 +1179,7 @@ mod tests {
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
 
@@ -1197,6 +1199,7 @@ mod tests {
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
 

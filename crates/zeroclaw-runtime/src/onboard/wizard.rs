@@ -3864,6 +3864,9 @@ fn setup_channels(existing: Option<ChannelsConfig>) -> Result<ChannelsConfig> {
                         .unwrap_or(false),
                     mention_only: existing_tg.map(|t| t.mention_only).unwrap_or(false),
                     ack_reactions: existing_tg.and_then(|t| t.ack_reactions),
+                    direct_chat_reply_intent_precheck: existing_tg
+                        .map(|t| t.direct_chat_reply_intent_precheck)
+                        .unwrap_or(true),
                     proxy_url: existing_tg.and_then(|t| t.proxy_url.clone()),
                 });
             }

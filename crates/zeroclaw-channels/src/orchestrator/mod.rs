@@ -2001,6 +2001,23 @@ impl AssistantChannelOutcome {
     }
 }
 
+fn is_direct_telegram_chat(reply_target: &str) -> bool {
+    let chat_id = reply_target.split(':').next().unwrap_or(reply_target);
+    chat_id.parse::<i64>().map(|id| id > 0).unwrap_or(false)
+}
+
+fn should_skip_reply_intent_precheck(ctx: &ChannelRuntimeContext, msg: &ChannelMessage) -> bool {
+    matches!(msg.channel.as_str(), "telegram")
+        && is_direct_telegram_chat(&msg.reply_target)
+        && !ctx
+            .prompt_config
+            .channels_config
+            .telegram
+            .as_ref()
+            .map(|tg| tg.direct_chat_reply_intent_precheck)
+            .unwrap_or(true)
+}
+
 async fn classify_channel_reply_intent(
     provider: &dyn Provider,
     system_prompt: &str,
@@ -2777,15 +2794,24 @@ async fn process_channel_message(
     }
 
     // ── Reply-intent precheck ────────────────────────────────────────
-    let reply_intent = classify_channel_reply_intent(
-        active_provider.as_ref(),
-        history[0].content.as_str(),
-        &history,
-        route.model.as_str(),
-        runtime_defaults.temperature,
-    )
-    .await
-    .unwrap_or(AssistantChannelOutcome::Reply(String::new()));
+    let reply_intent = if should_skip_reply_intent_precheck(ctx.as_ref(), &msg) {
+        tracing::info!(
+            channel = %msg.channel,
+            reply_target = %msg.reply_target,
+            "Skipping reply-intent precheck for direct chat"
+        );
+        AssistantChannelOutcome::Reply(String::new())
+    } else {
+        classify_channel_reply_intent(
+            active_provider.as_ref(),
+            history[0].content.as_str(),
+            &history,
+            route.model.as_str(),
+            runtime_defaults.temperature,
+        )
+        .await
+        .unwrap_or(AssistantChannelOutcome::Reply(String::new()))
+    };
 
     if let AssistantChannelOutcome::NoReply { reason } = reply_intent {
         let history_response = AssistantChannelOutcome::NoReply {
@@ -6343,6 +6369,24 @@ mod tests {
         }
     }
 
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CountingProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("ok".to_string())
+        }
+    }
+
     struct FormatErrorProvider;
 
     #[async_trait::async_trait]
@@ -8634,6 +8678,104 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let starts = channel_impl.start_typing_calls.load(Ordering::SeqCst);
         assert_eq!(starts, 0, "no-reply precheck should not show typing");
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_skips_reply_precheck_for_direct_telegram_chat() {
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut cfg = zeroclaw_config::schema::Config::default();
+        cfg.channels_config.telegram = Some(zeroclaw_config::schema::TelegramConfig {
+            enabled: true,
+            bot_token: "123:ABC".to_string(),
+            allowed_users: vec!["alice".to_string()],
+            direct_chat_reply_intent_precheck: false,
+            ..zeroclaw_config::schema::TelegramConfig::default()
+        });
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: Arc::new(CountingProvider {
+                calls: Arc::clone(&calls),
+            }),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 10,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            prompt_config: Arc::new(cfg),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: false,
+            show_tool_calls: true,
+            session_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        process_channel_message(
+            runtime_ctx,
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-telegram-direct-1".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "123456789".to_string(),
+                content: "hello".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "direct telegram chat should skip reply-intent precheck and make only one provider call");
     }
 
     #[tokio::test]
@@ -11374,6 +11516,7 @@ This is an example JSON object for profile settings."#;
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
         match build_channel_by_id(&config, "telegram") {

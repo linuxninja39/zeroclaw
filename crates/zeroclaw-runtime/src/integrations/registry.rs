@@ -842,6 +842,7 @@ mod tests {
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
         let entries = all_integrations();

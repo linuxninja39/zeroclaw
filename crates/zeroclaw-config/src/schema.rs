@@ -6878,6 +6878,12 @@ pub struct TelegramConfig {
     /// explicitly, it takes precedence.
     #[serde(default)]
     pub ack_reactions: Option<bool>,
+    /// Whether direct Telegram chats should run the channel-level
+    /// reply/no-reply classifier before the main response turn.
+    /// Default: `true` (preserves upstream behavior). Set `false` to skip the
+    /// extra precheck in direct chats and answer immediately.
+    #[serde(default = "default_true")]
+    pub direct_chat_reply_intent_precheck: bool,
     /// Per-channel proxy URL (http, https, socks5, socks5h).
     /// Overrides the global `[proxy]` setting for this channel only.
     #[serde(default)]
@@ -11490,6 +11496,7 @@ auto_save = true
                     interrupt_on_new_message: false,
                     mention_only: false,
                     ack_reactions: None,
+                    direct_chat_reply_intent_precheck: true,
                     proxy_url: None,
                 }),
                 discord: None,
@@ -12309,6 +12316,7 @@ default_temperature = 0.7
             interrupt_on_new_message: true,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         };
         let json = serde_json::to_string(&tc).unwrap();
@@ -15221,6 +15229,7 @@ require_otp_to_resume = true
             interrupt_on_new_message: false,
             mention_only: false,
             ack_reactions: None,
+            direct_chat_reply_intent_precheck: true,
             proxy_url: None,
         });
 
@@ -15829,6 +15838,30 @@ require_otp_to_resume = true
             !effective,
             "must fall back to top-level false when channel omits field"
         );
+    }
+
+    #[test]
+    async fn telegram_config_direct_chat_reply_intent_precheck_defaults_true() {
+        let tg_toml = r#"
+            bot_token = "123:ABC"
+            allowed_users = ["alice"]
+        "#;
+        let tg: TelegramConfig = toml::from_str(tg_toml).unwrap();
+        assert!(
+            tg.direct_chat_reply_intent_precheck,
+            "missing field must preserve upstream precheck behavior"
+        );
+    }
+
+    #[test]
+    async fn telegram_config_direct_chat_reply_intent_precheck_false_deserializes() {
+        let tg_toml = r#"
+            bot_token = "123:ABC"
+            allowed_users = ["alice"]
+            direct_chat_reply_intent_precheck = false
+        "#;
+        let tg: TelegramConfig = toml::from_str(tg_toml).unwrap();
+        assert!(!tg.direct_chat_reply_intent_precheck);
     }
 
     #[test]
