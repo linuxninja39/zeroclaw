@@ -147,6 +147,12 @@ For detailed setup guidance, see [Multi-Model Setup and Fallback Chains](/docs/g
 | `nvidia` | `nvidia-nim`, `build.nvidia.com` | No | `NVIDIA_API_KEY` |
 | `avian` | — | No | `AVIAN_API_KEY` |
 
+### Anthropic Auth Profiles
+
+- Anthropic supports saved auth profiles from `~/.zeroclaw/auth-profiles.json`.
+- Runtime precedence is: explicit `api_key` → explicit agent `auth_profile` → `provider = "anthropic:<profile>"` shorthand → active/default Anthropic profile → `ANTHROPIC_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`.
+- Saved Anthropic profile metadata such as `auth_kind = "authorization"` is honored at runtime, so bearer-style subscription/setup tokens are sent with `Authorization: Bearer ...` instead of `x-api-key`.
+
 ### Vercel AI Gateway Notes
 
 - Provider ID: `vercel` (alias: `vercel-ai`)
