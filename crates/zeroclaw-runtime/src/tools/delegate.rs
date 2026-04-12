@@ -375,6 +375,14 @@ impl Tool for DelegateTool {
 }
 
 impl DelegateTool {
+    fn provider_options_for_agent(&self, agent_config: &DelegateAgentConfig) -> zeroclaw_providers::ProviderRuntimeOptions {
+        let mut options = self.provider_runtime_options.clone();
+        if agent_config.auth_profile.is_some() {
+            options.auth_profile_override = agent_config.auth_profile.clone();
+        }
+        options
+    }
+
     /// Original synchronous delegation path (extracted for reuse).
     async fn execute_sync(
         &self,
@@ -441,11 +449,12 @@ impl DelegateTool {
             .or_else(|| self.fallback_credential.clone());
         #[allow(clippy::option_as_ref_deref)]
         let provider_credential = provider_credential_owned.as_ref().map(String::as_str);
+        let provider_options = self.provider_options_for_agent(agent_config);
 
         let provider: Box<dyn Provider> = match zeroclaw_providers::create_provider_with_options(
             &agent_config.provider,
             provider_credential,
-            &self.provider_runtime_options,
+            &provider_options,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1281,6 +1290,7 @@ mod tests {
                 model: "llama3".to_string(),
                 system_prompt: Some("You are a research assistant.".to_string()),
                 api_key: None,
+                auth_profile: None,
                 temperature: Some(0.3),
                 max_depth: 3,
                 agentic: false,
@@ -1299,6 +1309,7 @@ mod tests {
                 model: "anthropic/claude-sonnet-4-20250514".to_string(),
                 system_prompt: None,
                 api_key: Some("delegate-test-credential".to_string()),
+                auth_profile: None,
                 temperature: None,
                 max_depth: 2,
                 agentic: false,
@@ -1456,6 +1467,7 @@ mod tests {
             model: "model-test".to_string(),
             system_prompt: Some("You are agentic.".to_string()),
             api_key: Some("delegate-test-credential".to_string()),
+            auth_profile: None,
             temperature: Some(0.2),
             max_depth: 3,
             agentic: true,
@@ -1572,6 +1584,7 @@ mod tests {
                 model: "model".to_string(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -1686,6 +1699,7 @@ mod tests {
                 model: "test-model".to_string(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -1727,6 +1741,7 @@ mod tests {
                 model: "test-model".to_string(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2016,6 +2031,7 @@ mod tests {
             model: "test-model".to_string(),
             system_prompt: Some("You are a code reviewer.".to_string()),
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2070,6 +2086,7 @@ mod tests {
             model: "test-model".to_string(),
             system_prompt: None,
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2141,6 +2158,7 @@ mod tests {
             model: "llama3".to_string(),
             system_prompt: None,
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: false,
@@ -2170,6 +2188,7 @@ mod tests {
             model: "test-model".to_string(),
             system_prompt: None,
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2204,6 +2223,7 @@ mod tests {
             model: "llama3".to_string(),
             system_prompt: None,
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: false,
@@ -2251,6 +2271,41 @@ mod tests {
     }
 
     #[test]
+    fn auth_profile_deserializes_for_delegate_agent() {
+        let toml_str = r#"
+            provider = "anthropic"
+            model = "claude-sonnet-4-20250514"
+            auth_profile = "s56"
+        "#;
+        let config: DelegateAgentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.auth_profile.as_deref(), Some("s56"));
+    }
+
+    #[test]
+    fn explicit_auth_profile_override_wins_for_delegate_agent() {
+        let tool = DelegateTool::new(HashMap::new(), None, test_security());
+        let config = DelegateAgentConfig {
+            provider: "anthropic:s56".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            system_prompt: None,
+            api_key: None,
+            auth_profile: Some("s99".to_string()),
+            temperature: None,
+            max_depth: 3,
+            agentic: false,
+            allowed_tools: Vec::new(),
+            max_iterations: 10,
+            timeout_secs: None,
+            agentic_timeout_secs: None,
+            skills_directory: None,
+            memory_namespace: None,
+        };
+
+        let options = tool.provider_options_for_agent(&config);
+        assert_eq!(options.auth_profile_override.as_deref(), Some("s99"));
+    }
+
+    #[test]
     fn config_validation_rejects_zero_timeout() {
         let mut config = zeroclaw_config::schema::Config::default();
         config.agents.insert(
@@ -2260,6 +2315,7 @@ mod tests {
                 model: "llama3".into(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2288,6 +2344,7 @@ mod tests {
                 model: "llama3".into(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2316,6 +2373,7 @@ mod tests {
                 model: "llama3".into(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2344,6 +2402,7 @@ mod tests {
                 model: "llama3".into(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2372,6 +2431,7 @@ mod tests {
                 model: "llama3".into(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2396,6 +2456,7 @@ mod tests {
                 model: "llama3".into(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2429,6 +2490,7 @@ mod tests {
             model: "test-model".to_string(),
             system_prompt: None,
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2476,6 +2538,7 @@ mod tests {
             model: "test-model".to_string(),
             system_prompt: None,
             api_key: None,
+            auth_profile: None,
             temperature: None,
             max_depth: 3,
             agentic: true,

@@ -44,6 +44,8 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
+const VERSION_DISPLAY: &str = concat!(env!("CARGO_PKG_VERSION"), " (jacob-auth-profile-patched)");
+
 fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
     config::schema::validate_temperature(t)
@@ -160,6 +162,13 @@ pub use zeroclaw::{
     MigrateCommands, PeripheralCommands, ServiceCommands, SkillCommands, SopCommands,
 };
 
+#[cfg(feature = "agent-runtime")]
+fn register_cli_channel_factory() {
+    zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
+        Box::new(zeroclaw_channels::cli::CliChannel::new())
+    }));
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum CompletionShell {
     #[value(name = "bash")]
@@ -190,7 +199,7 @@ enum EstopLevelArg {
 #[derive(Parser, Debug)]
 #[command(name = "zeroclaw")]
 #[command(author = "theonlyhennygod")]
-#[command(version)]
+#[command(version = VERSION_DISPLAY)]
 #[command(about = "The fastest, smallest AI assistant.", long_about = None)]
 struct Cli {
     #[arg(long, global = true)]
@@ -1199,6 +1208,8 @@ async fn main() -> Result<()> {
             temperature,
             peripheral,
         } => {
+            register_cli_channel_factory();
+
             let final_temperature = temperature.unwrap_or(config.default_temperature);
 
             Box::pin(agent::run(
@@ -1351,9 +1362,7 @@ async fn main() -> Result<()> {
             }
             // Wire CLI channel for interactive mode
             #[cfg(feature = "agent-runtime")]
-            zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
-                Box::new(zeroclaw_channels::cli::CliChannel::new())
-            }));
+            register_cli_channel_factory();
 
             // Wire peripheral tools from zeroclaw-hardware
             #[cfg(feature = "hardware")]
@@ -1437,7 +1446,7 @@ async fn main() -> Result<()> {
             }
             println!("🦀 ZeroClaw Status");
             println!();
-            println!("Version:     {}", env!("CARGO_PKG_VERSION"));
+            println!("Version:     {}", VERSION_DISPLAY);
             println!("Workspace:   {}", config.workspace_dir.display());
             println!("Config:      {}", config.config_path.display());
             println!();
@@ -3091,6 +3100,16 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn cli_definition_has_no_flag_conflicts() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    #[cfg(feature = "agent-runtime")]
+    fn interactive_runtime_registers_cli_channel_factory() {
+        register_cli_channel_factory();
+        assert!(
+            zeroclaw_runtime::agent::loop_::CLI_CHANNEL_FN.get().is_some(),
+            "interactive runtime should register the CLI channel factory"
+        );
     }
 
     #[test]

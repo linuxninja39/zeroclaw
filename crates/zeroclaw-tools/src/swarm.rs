@@ -23,6 +23,17 @@ pub struct SwarmTool {
 }
 
 impl SwarmTool {
+    fn provider_options_for_agent(
+        &self,
+        agent_config: &DelegateAgentConfig,
+    ) -> zeroclaw_providers::ProviderRuntimeOptions {
+        let mut options = self.provider_runtime_options.clone();
+        if agent_config.auth_profile.is_some() {
+            options.auth_profile_override = agent_config.auth_profile.clone();
+        }
+        options
+    }
+
     pub fn new(
         swarms: HashMap<String, SwarmConfig>,
         agents: HashMap<String, DelegateAgentConfig>,
@@ -48,11 +59,12 @@ impl SwarmTool {
             .api_key
             .clone()
             .or_else(|| self.fallback_credential.clone());
+        let provider_options = self.provider_options_for_agent(agent_config);
 
         zeroclaw_providers::create_provider_with_options(
             &agent_config.provider,
             credential.as_deref(),
-            &self.provider_runtime_options,
+            &provider_options,
         )
         .map_err(|e| ToolResult {
             success: false,
@@ -198,11 +210,12 @@ impl SwarmTool {
                 .api_key
                 .clone()
                 .or_else(|| self.fallback_credential.clone());
+            let provider_options = self.provider_options_for_agent(&agent_config);
 
             let provider = match zeroclaw_providers::create_provider_with_options(
                 &agent_config.provider,
                 credential.as_deref(),
-                &self.provider_runtime_options,
+                &provider_options,
             ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -562,6 +575,7 @@ mod tests {
                 model: "llama3".to_string(),
                 system_prompt: Some("You are a research assistant.".to_string()),
                 api_key: None,
+                auth_profile: None,
                 temperature: Some(0.3),
                 max_depth: 3,
                 agentic: false,
@@ -580,6 +594,7 @@ mod tests {
                 model: "anthropic/claude-sonnet-4-20250514".to_string(),
                 system_prompt: Some("You are a technical writer.".to_string()),
                 api_key: Some("test-key".to_string()),
+                auth_profile: None,
                 temperature: Some(0.5),
                 max_depth: 3,
                 agentic: false,

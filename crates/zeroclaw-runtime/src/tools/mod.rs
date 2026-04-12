@@ -1190,6 +1190,7 @@ mod tests {
                 model: "llama3".to_string(),
                 system_prompt: None,
                 api_key: None,
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,

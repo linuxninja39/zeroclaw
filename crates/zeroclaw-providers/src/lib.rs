@@ -1081,11 +1081,17 @@ pub fn create_provider_with_options(
     api_key: Option<&str>,
     options: &ProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn Provider>> {
-    match name {
+    let (provider_name, profile_override) = parse_provider_profile(name);
+    let mut options = options.clone();
+    if options.auth_profile_override.is_none() {
+        options.auth_profile_override = profile_override.map(ToString::to_string);
+    }
+
+    match provider_name {
         "openai-codex" | "openai_codex" | "codex" => Ok(Box::new(
-            openai_codex::OpenAiCodexProvider::new(options, api_key)?,
+            openai_codex::OpenAiCodexProvider::new(&options, api_key)?,
         )),
-        _ => create_provider_with_url_and_options(name, api_key, None, options),
+        _ => create_provider_with_url_and_options(provider_name, api_key, None, &options),
     }
 }
 
@@ -1185,7 +1191,18 @@ fn create_provider_with_url_and_options(
                 .with_max_tokens(options.provider_max_tokens),
         )),
         "anthropic" => {
-            let mut p = anthropic::AnthropicProvider::new(key);
+            let state_dir = options.zeroclaw_dir.clone().unwrap_or_else(|| {
+                directories::UserDirs::new().map_or_else(
+                    || PathBuf::from(".zeroclaw"),
+                    |dirs| dirs.home_dir().join(".zeroclaw"),
+                )
+            });
+            let auth_service = AuthService::new(&state_dir, options.secrets_encrypt);
+            let explicit_credential = api_key
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let mut p = anthropic::AnthropicProvider::new(explicit_credential);
+            p = p.with_auth(auth_service, options.auth_profile_override.clone());
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(mt);
             }
@@ -3622,6 +3639,13 @@ mod tests {
         let (name, profile) = parse_provider_profile("openai-codex:second");
         assert_eq!(name, "openai-codex");
         assert_eq!(profile, Some("second"));
+    }
+
+    #[test]
+    fn parse_provider_profile_with_anthropic_profile() {
+        let (name, profile) = parse_provider_profile("anthropic:s56");
+        assert_eq!(name, "anthropic");
+        assert_eq!(profile, Some("s56"));
     }
 
     #[test]

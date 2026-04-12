@@ -643,6 +643,10 @@ pub struct DelegateAgentConfig {
     #[serde(default)]
     #[secret]
     pub api_key: Option<String>,
+    /// Optional managed auth profile override (for providers that support auth profiles).
+    /// Takes precedence over active/default saved profiles for the provider.
+    #[serde(default)]
+    pub auth_profile: Option<String>,
     /// Temperature override
     #[serde(default)]
     pub temperature: Option<f64>,
@@ -12170,6 +12174,7 @@ default_temperature = 0.7
                 model: "model-test".into(),
                 system_prompt: None,
                 api_key: Some("agent-credential".into()),
+                auth_profile: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,

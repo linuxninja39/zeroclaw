@@ -176,6 +176,8 @@ pub fn load_interactive_session_history(
         state.history.push(ChatMessage::system(system_prompt));
     } else if state.history.first().map(|msg| msg.role.as_str()) != Some("system") {
         state.history.insert(0, ChatMessage::system(system_prompt));
+    } else if state.history.first().map(|msg| msg.content.as_str()) != Some(system_prompt) {
+        state.history[0] = ChatMessage::system(system_prompt);
     }
 
     Ok(state.history)
@@ -189,4 +191,33 @@ pub fn save_interactive_session_history(path: &Path, history: &[ChatMessage]) ->
     let payload = serde_json::to_string_pretty(&InteractiveSessionState::from_history(history))?;
     std::fs::write(path, payload)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_interactive_session_history_replaces_stale_system_prompt() {
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let path = dir.path().join("session.json");
+        let stale = InteractiveSessionState {
+            version: 1,
+            history: vec![
+                ChatMessage::system("old system prompt"),
+                ChatMessage::user("hello"),
+            ],
+        };
+        std::fs::write(&path, serde_json::to_string(&stale).unwrap()).unwrap();
+
+        let history = load_interactive_session_history(&path, "new system prompt")
+            .expect("history load should succeed");
+
+        assert_eq!(history.first().map(|m| m.role.as_str()), Some("system"));
+        assert_eq!(
+            history.first().map(|m| m.content.as_str()),
+            Some("new system prompt")
+        );
+        assert_eq!(history.get(1).map(|m| m.content.as_str()), Some("hello"));
+    }
 }

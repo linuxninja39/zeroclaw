@@ -269,6 +269,7 @@ Delegate sub-agent configurations. Each key under `[agents]` defines a named sub
 | `model` | _required_ | Model name for the sub-agent |
 | `system_prompt` | unset | Optional system prompt override for the sub-agent |
 | `api_key` | unset | Optional API key override (stored encrypted when `secrets.encrypt = true`) |
+| `auth_profile` | unset | Optional saved auth profile override for providers that support auth profiles |
 | `temperature` | unset | Temperature override for the sub-agent |
 | `max_depth` | `3` | Max recursion depth for nested delegation |
 | `agentic` | `false` | Enable multi-turn tool-call loop mode for the sub-agent |
@@ -282,6 +283,7 @@ Notes:
 
 - `agentic = false` preserves existing single prompt→response delegate behavior.
 - `agentic = true` requires at least one matching entry in `allowed_tools`.
+- Auth selection precedence for supported providers is: explicit `api_key` → explicit `auth_profile` → `provider = "name:profile"` shorthand → active/default saved profile → environment variables.
 - The `delegate` tool is excluded from sub-agent allowlists to prevent re-entrant delegation loops.
 - Sub-agents receive an enriched system prompt containing: tools section (allowed tools with parameters), skills section (from scoped or default directory), workspace path, current date/time, safety constraints, and shell policy when `shell` is in the effective tool list.
 - When `skills_directory` is unset or empty, the sub-agent loads skills from the default workspace `skills/` directory. When set, skills are loaded exclusively from that directory (relative to workspace root), enabling per-agent scoped skill sets.
@@ -306,10 +308,15 @@ timeout_secs = 60
 [agents.code_reviewer]
 provider = "anthropic"
 model = "claude-opus-4-5"
+auth_profile = "s56"
 system_prompt = "You are an expert code reviewer focused on security and performance."
 agentic = true
 allowed_tools = ["file_read", "shell"]
 skills_directory = "skills/code-review"
+
+[agents.research_backup]
+provider = "anthropic:sherpas"
+model = "claude-sonnet-4-20250514"
 ```
 
 ## `[runtime]`

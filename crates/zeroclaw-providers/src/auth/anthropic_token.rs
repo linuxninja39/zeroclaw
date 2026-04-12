@@ -40,6 +40,11 @@ pub fn detect_auth_kind(token: &str, explicit: Option<&str>) -> AnthropicAuthKin
         return AnthropicAuthKind::Authorization;
     }
 
+    // Anthropic Claude Code / subscription setup tokens use bearer auth.
+    if trimmed.starts_with("sk-ant-oat") {
+        return AnthropicAuthKind::Authorization;
+    }
+
     // Anthropic platform keys commonly start with this prefix.
     if trimmed.starts_with("sk-ant-api") {
         return AnthropicAuthKind::ApiKey;
@@ -82,5 +87,11 @@ mod tests {
     fn detect_default_for_api_prefix() {
         let kind = detect_auth_kind("sk-ant-api-123", None);
         assert_eq!(kind, AnthropicAuthKind::ApiKey);
+    }
+
+    #[test]
+    fn detect_setup_token_as_authorization() {
+        let kind = detect_auth_kind("sk-ant-oat01-123", None);
+        assert_eq!(kind, AnthropicAuthKind::Authorization);
     }
 }
