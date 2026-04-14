@@ -375,7 +375,10 @@ impl Tool for DelegateTool {
 }
 
 impl DelegateTool {
-    fn provider_options_for_agent(&self, agent_config: &DelegateAgentConfig) -> zeroclaw_providers::ProviderRuntimeOptions {
+    fn provider_options_for_agent(
+        &self,
+        agent_config: &DelegateAgentConfig,
+    ) -> zeroclaw_providers::ProviderRuntimeOptions {
         let mut options = self.provider_runtime_options.clone();
         if agent_config.auth_profile.is_some() {
             options.auth_profile_override = agent_config.auth_profile.clone();

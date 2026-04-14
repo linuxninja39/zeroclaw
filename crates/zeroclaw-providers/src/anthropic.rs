@@ -288,9 +288,11 @@ impl AnthropicProvider {
             }
         }
 
-        Ok(resolve_provider_credential("anthropic", None).map(|token| ResolvedAnthropicCredential {
-            auth_kind: detect_auth_kind(&token, None),
-            token,
+        Ok(resolve_provider_credential("anthropic", None).map(|token| {
+            ResolvedAnthropicCredential {
+                auth_kind: detect_auth_kind(&token, None),
+                token,
+            }
         }))
     }
 

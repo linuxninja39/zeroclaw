@@ -1198,9 +1198,7 @@ fn create_provider_with_url_and_options(
                 )
             });
             let auth_service = AuthService::new(&state_dir, options.secrets_encrypt);
-            let explicit_credential = api_key
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let explicit_credential = api_key.map(str::trim).filter(|value| !value.is_empty());
             let mut p = anthropic::AnthropicProvider::new(explicit_credential);
             p = p.with_auth(auth_service, options.auth_profile_override.clone());
             if let Some(mt) = options.provider_max_tokens {

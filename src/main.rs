@@ -3107,7 +3107,9 @@ mod tests {
     fn interactive_runtime_registers_cli_channel_factory() {
         register_cli_channel_factory();
         assert!(
-            zeroclaw_runtime::agent::loop_::CLI_CHANNEL_FN.get().is_some(),
+            zeroclaw_runtime::agent::loop_::CLI_CHANNEL_FN
+                .get()
+                .is_some(),
             "interactive runtime should register the CLI channel factory"
         );
     }

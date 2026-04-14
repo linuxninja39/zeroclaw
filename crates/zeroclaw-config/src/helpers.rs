@@ -148,7 +148,11 @@ fn parse_prop_value(value_str: &str, kind: PropKind) -> anyhow::Result<toml::Val
                 )
             })?;
             match parsed {
-                toml::Value::Array(items) if items.iter().all(|item| matches!(item, toml::Value::String(_))) => {
+                toml::Value::Array(items)
+                    if items
+                        .iter()
+                        .all(|item| matches!(item, toml::Value::String(_))) =>
+                {
                     Ok(toml::Value::Array(items))
                 }
                 _ => anyhow::bail!(
