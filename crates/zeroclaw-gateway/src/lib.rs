@@ -2643,6 +2643,7 @@ mod tests {
             thread_ts: None,
             interruption_scope_id: None,
             attachments: vec![],
+            conversation: None,
         };
 
         let key = whatsapp_memory_key(&msg);

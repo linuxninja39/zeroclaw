@@ -218,6 +218,7 @@ impl WatiChannel {
             thread_ts: None,
             interruption_scope_id: None,
             attachments: vec![],
+            conversation: None,
         });
 
         messages
@@ -361,6 +362,7 @@ impl WatiChannel {
             thread_ts: None,
             interruption_scope_id: None,
             attachments: vec![],
+            conversation: None,
         });
 
         messages

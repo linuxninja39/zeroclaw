@@ -122,12 +122,14 @@ pub fn strip_tool_call_tags(message: &str) -> String {
 }
 
 /// Generate a conversation history key from a channel message.
+///
+/// Uses `canonical_conversation()` for the conversation segment so that
+/// Matrix room messages from different senders share a single history bucket,
+/// while still isolating by sender for DM platforms (where canonical == reply_target).
 pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
+    let conv = msg.canonical_conversation();
     match &msg.thread_ts {
-        Some(tid) => format!(
-            "{}_{}_{}_{}",
-            msg.channel, msg.reply_target, tid, msg.sender
-        ),
-        None => format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender),
+        Some(tid) => format!("{}_{}_{}_{}", msg.channel, conv, tid, msg.sender),
+        None => format!("{}_{}_{}", msg.channel, conv, msg.sender),
     }
 }

@@ -8,6 +8,11 @@ use crate::media::MediaAttachment;
 pub struct ChannelMessage {
     pub id: String,
     pub sender: String,
+    /// Reply routing target — where the bot sends its response.
+    /// This may encode extra routing state (e.g. Matrix uses `"sender||room_id"`
+    /// so the send path can extract both the room and the originating user).
+    /// Do NOT use this as a stable conversation identity; use `canonical_conversation()`
+    /// or the `conversation` field instead.
     pub reply_target: String,
     pub content: String,
     pub channel: String,
@@ -24,6 +29,29 @@ pub struct ChannelMessage {
     /// Channels populate this when they receive media alongside a text message.
     /// Defaults to empty — existing channels are unaffected.
     pub attachments: Vec<MediaAttachment>,
+    /// Canonical external conversation identifier — the stable identity of the
+    /// conversation this message belongs to, independent of reply routing.
+    ///
+    /// Examples:
+    /// - Matrix: room ID (`!abc123:example.com`), NOT the `sender||room` reply target
+    /// - Slack/Discord/IRC: channel ID (same as `reply_target` for these platforms)
+    /// - DM platforms (Telegram, Signal, WhatsApp): phone/chat ID (same as `reply_target`)
+    ///
+    /// `None` means the channel has not explicitly set a canonical conversation;
+    /// callers should fall back to `reply_target` via `canonical_conversation()`.
+    /// New channels should always populate this field.
+    pub conversation: Option<String>,
+}
+
+impl ChannelMessage {
+    /// Returns the canonical conversation identity for this message.
+    ///
+    /// Uses the explicitly set `conversation` field when available; otherwise
+    /// falls back to `reply_target` for backward compatibility with channels
+    /// that pre-date this field.
+    pub fn canonical_conversation(&self) -> &str {
+        self.conversation.as_deref().unwrap_or(&self.reply_target)
+    }
 }
 
 /// Message to send through a channel

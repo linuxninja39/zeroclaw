@@ -1188,6 +1188,8 @@ impl Channel for MatrixChannel {
                 let msg = ChannelMessage {
                     id: event_id,
                     sender: sender.clone(),
+                    // reply_target encodes "sender||room_id" so the send path can
+                    // extract both the room and the originating user for reply routing.
                     reply_target: format!("{}||{}", sender, room.room_id()),
                     content: body,
                     channel: "matrix".to_string(),
@@ -1198,6 +1200,9 @@ impl Channel for MatrixChannel {
                     thread_ts: thread_ts.clone(),
                     interruption_scope_id: thread_ts,
                     attachments: vec![],
+                    // Canonical conversation identity is the room ID alone,
+                    // independent of who sent the message.
+                    conversation: Some(room.room_id().to_string()),
                 };
 
                 let _ = tx.send(msg).await;

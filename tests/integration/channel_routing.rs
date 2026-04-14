@@ -27,6 +27,7 @@ fn channel_message_sender_field_holds_platform_user_id() {
         thread_ts: None,
         interruption_scope_id: None,
         attachments: vec![],
+        conversation: None,
     };
 
     assert_eq!(msg.sender, "123456789");
@@ -51,6 +52,7 @@ fn channel_message_reply_target_distinct_from_sender() {
         thread_ts: None,
         interruption_scope_id: None,
         attachments: vec![],
+        conversation: None,
     };
 
     assert_ne!(
@@ -58,6 +60,43 @@ fn channel_message_reply_target_distinct_from_sender() {
         "sender and reply_target should be distinct for Discord"
     );
     assert_eq!(msg.reply_target, "channel_123");
+}
+
+#[test]
+fn channel_message_canonical_conversation_defaults_to_reply_target() {
+    let msg = ChannelMessage {
+        id: "msg_1".into(),
+        sender: "user_987654".into(),
+        reply_target: "channel_123".into(),
+        content: "test message".into(),
+        channel: "discord".into(),
+        timestamp: 1700000000,
+        thread_ts: None,
+        interruption_scope_id: None,
+        attachments: vec![],
+        conversation: None,
+    };
+
+    assert_eq!(msg.canonical_conversation(), "channel_123");
+}
+
+#[test]
+fn channel_message_canonical_conversation_can_override_reply_target() {
+    let msg = ChannelMessage {
+        id: "msg_1".into(),
+        sender: "@alice:example.com".into(),
+        reply_target: "@alice:example.com||!room:example.com".into(),
+        content: "test message".into(),
+        channel: "matrix".into(),
+        timestamp: 1700000000,
+        thread_ts: None,
+        interruption_scope_id: None,
+        attachments: vec![],
+        conversation: Some("!room:example.com".into()),
+    };
+
+    assert_eq!(msg.reply_target, "@alice:example.com||!room:example.com");
+    assert_eq!(msg.canonical_conversation(), "!room:example.com");
 }
 
 #[test]
@@ -73,6 +112,7 @@ fn channel_message_fields_not_swapped() {
         thread_ts: None,
         interruption_scope_id: None,
         attachments: vec![],
+        conversation: None,
     };
 
     assert_eq!(
@@ -101,6 +141,7 @@ fn channel_message_preserves_all_fields_on_clone() {
         thread_ts: None,
         interruption_scope_id: None,
         attachments: vec![],
+        conversation: None,
     };
 
     let cloned = original.clone();
@@ -196,6 +237,7 @@ impl Channel for CapturingChannel {
             thread_ts: None,
             interruption_scope_id: None,
             attachments: vec![],
+            conversation: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))
