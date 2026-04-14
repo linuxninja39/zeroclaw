@@ -472,6 +472,143 @@ fn resolve_public_peer_for_message<'a>(
     config.resolve_public_peer(&msg.channel, msg.canonical_conversation())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PublicPeerExecutionContext {
+    peer_id: String,
+    default_route: Option<ChannelRouteSelection>,
+    identity_overlay: Option<String>,
+}
+
+fn resolve_public_peer_runtime_route(
+    model_routes: &[zeroclaw_config::schema::ModelRouteConfig],
+    runtime_ref: &str,
+) -> Option<ChannelRouteSelection> {
+    let runtime_ref = runtime_ref.trim();
+    if runtime_ref.is_empty() {
+        return None;
+    }
+
+    let hint_ref = runtime_ref.strip_prefix("hint:").unwrap_or(runtime_ref);
+    model_routes
+        .iter()
+        .find(|route| {
+            route.hint.eq_ignore_ascii_case(hint_ref)
+                || route.model.eq_ignore_ascii_case(runtime_ref)
+        })
+        .map(|route| ChannelRouteSelection {
+            provider: route.provider.clone(),
+            model: route.model.clone(),
+            api_key: route.api_key.clone(),
+        })
+}
+
+fn load_public_peer_identity_overlay(
+    workspace_dir: &Path,
+    peer_id: &str,
+    identity_ref: &str,
+) -> Result<Option<String>> {
+    let identity_ref = identity_ref.trim();
+    if identity_ref.is_empty() {
+        return Ok(None);
+    }
+
+    let full_path = if Path::new(identity_ref).is_absolute() {
+        PathBuf::from(identity_ref)
+    } else {
+        workspace_dir.join(identity_ref)
+    };
+
+    let mut rendered_overlay = None;
+    let looks_like_json = full_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+    if looks_like_json {
+        let identity_config = zeroclaw_config::schema::IdentityConfig {
+            format: "aieos".into(),
+            aieos_path: Some(identity_ref.to_string()),
+            aieos_inline: None,
+        };
+        if let Ok(Some(aieos_identity)) =
+            zeroclaw_runtime::identity::load_aieos_identity(&identity_config, workspace_dir)
+        {
+            let rendered = zeroclaw_runtime::identity::aieos_to_system_prompt(&aieos_identity);
+            if !rendered.trim().is_empty() {
+                rendered_overlay = Some(rendered);
+            }
+        }
+    }
+
+    let rendered_overlay = match rendered_overlay {
+        Some(rendered) => rendered,
+        None => {
+            let contents = std::fs::read_to_string(&full_path).with_context(|| {
+                format!(
+                    "Failed to read peer identity overlay from {}",
+                    full_path.display()
+                )
+            })?;
+            let trimmed = contents.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            truncate_with_ellipsis(
+                trimmed,
+                zeroclaw_runtime::agent::system_prompt::BOOTSTRAP_MAX_CHARS,
+            )
+        }
+    };
+
+    Ok(Some(format!(
+        "## Peer Identity Overlay\n\nThis conversation is bound to public peer `{peer_id}`. Apply the following peer-specific identity instructions on top of the default workspace context.\n\n{rendered_overlay}"
+    )))
+}
+
+fn resolve_public_peer_execution_context(
+    ctx: &ChannelRuntimeContext,
+    resolved_public_peer: &zeroclaw_config::schema::ResolvedPublicPeer<'_>,
+) -> PublicPeerExecutionContext {
+    let mut execution = PublicPeerExecutionContext {
+        peer_id: resolved_public_peer.peer_id.to_string(),
+        ..PublicPeerExecutionContext::default()
+    };
+
+    let Some(peer) = resolved_public_peer.peer else {
+        return execution;
+    };
+
+    if let Some(runtime_ref) = peer.runtime_ref.as_deref() {
+        execution.default_route =
+            resolve_public_peer_runtime_route(ctx.model_routes.as_ref(), runtime_ref);
+        if execution.default_route.is_none() {
+            tracing::warn!(
+                public_peer = resolved_public_peer.peer_id,
+                runtime_ref,
+                "Ignoring unresolved public peer runtime_ref"
+            );
+        }
+    }
+
+    if let Some(identity_ref) = peer.identity_ref.as_deref() {
+        match load_public_peer_identity_overlay(
+            ctx.workspace_dir.as_ref(),
+            resolved_public_peer.peer_id,
+            identity_ref,
+        ) {
+            Ok(overlay) => execution.identity_overlay = overlay,
+            Err(err) => {
+                tracing::warn!(
+                    public_peer = resolved_public_peer.peer_id,
+                    identity_ref,
+                    "Failed to load public peer identity overlay: {err}"
+                );
+            }
+        }
+    }
+
+    execution
+}
+
 /// Returns `true` when `content` is a `/stop` command (with optional `@botname` suffix).
 /// Not gated on channel type — all non-CLI channels support `/stop`.
 fn is_stop_command(content: &str) -> bool {
@@ -1038,22 +1175,40 @@ fn default_route_selection(ctx: &ChannelRuntimeContext) -> ChannelRouteSelection
     }
 }
 
-fn get_route_selection(ctx: &ChannelRuntimeContext, sender_key: &str) -> ChannelRouteSelection {
+fn effective_default_route_selection(
+    ctx: &ChannelRuntimeContext,
+    public_peer_execution: &PublicPeerExecutionContext,
+) -> ChannelRouteSelection {
+    public_peer_execution
+        .default_route
+        .clone()
+        .unwrap_or_else(|| default_route_selection(ctx))
+}
+
+fn get_route_selection(
+    ctx: &ChannelRuntimeContext,
+    sender_key: &str,
+    default_route: &ChannelRouteSelection,
+) -> ChannelRouteSelection {
     ctx.route_overrides
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(sender_key)
         .cloned()
-        .unwrap_or_else(|| default_route_selection(ctx))
+        .unwrap_or_else(|| default_route.clone())
 }
 
-fn set_route_selection(ctx: &ChannelRuntimeContext, sender_key: &str, next: ChannelRouteSelection) {
-    let default_route = default_route_selection(ctx);
+fn set_route_selection(
+    ctx: &ChannelRuntimeContext,
+    sender_key: &str,
+    default_route: &ChannelRouteSelection,
+    next: ChannelRouteSelection,
+) {
     let mut routes = ctx
         .route_overrides
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if next == default_route {
+    if next == *default_route {
         routes.remove(sender_key);
     } else {
         routes.insert(sender_key.to_string(), next);
@@ -1766,8 +1921,10 @@ async fn handle_runtime_command_if_needed(
     };
 
     let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), msg);
+    let public_peer_execution = resolve_public_peer_execution_context(ctx, &resolved_public_peer);
     let sender_key = conversation_history_key_for_public_peer(msg, &resolved_public_peer);
-    let mut current = get_route_selection(ctx, &sender_key);
+    let default_route = effective_default_route_selection(ctx, &public_peer_execution);
+    let mut current = get_route_selection(ctx, &sender_key, &default_route);
 
     let response = match command {
         ChannelRuntimeCommand::ShowProviders => build_providers_help_response(&current),
@@ -1778,7 +1935,13 @@ async fn handle_runtime_command_if_needed(
                         Ok(_) => {
                             if provider_name != current.provider {
                                 current.provider = provider_name.clone();
-                                set_route_selection(ctx, &sender_key, current.clone());
+                                current.api_key = None;
+                                set_route_selection(
+                                    ctx,
+                                    &sender_key,
+                                    &default_route,
+                                    current.clone(),
+                                );
                             }
 
                             format!(
@@ -1816,8 +1979,9 @@ async fn handle_runtime_command_if_needed(
                     current.api_key = route.api_key.clone();
                 } else {
                     current.model = model.clone();
+                    current.api_key = None;
                 }
-                set_route_selection(ctx, &sender_key, current.clone());
+                set_route_selection(ctx, &sender_key, &default_route, current.clone());
 
                 format!(
                     "Model switched to `{}` (provider: `{}`). Context preserved.",
@@ -2570,15 +2734,20 @@ async fn process_channel_message(
     }
 
     let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+    let public_peer_execution =
+        resolve_public_peer_execution_context(ctx.as_ref(), &resolved_public_peer);
     let history_key = conversation_history_key_for_public_peer(&msg, &resolved_public_peer);
+    let default_route = effective_default_route_selection(ctx.as_ref(), &public_peer_execution);
     tracing::debug!(
         channel = %msg.channel,
         conversation = msg.canonical_conversation(),
         public_peer = resolved_public_peer.peer_id,
         explicit_binding = resolved_public_peer.binding.is_some(),
+        peer_runtime_overlay = public_peer_execution.default_route.is_some(),
+        peer_identity_overlay = public_peer_execution.identity_overlay.is_some(),
         "Resolved public peer for inbound channel message"
     );
-    let mut route = get_route_selection(ctx.as_ref(), &history_key);
+    let mut route = get_route_selection(ctx.as_ref(), &history_key, &default_route);
 
     // ── Query classification: override route when a rule matches ──
     if let Some(hint) =
@@ -2782,11 +2951,14 @@ async fn process_channel_message(
     // Use refreshed system prompt for new sessions (master's /new support),
     // and inject memory into system prompt (not user message) so it
     // doesn't pollute session history and is re-fetched each turn.
-    let base_system_prompt = if had_prior_history {
+    let mut base_system_prompt = if had_prior_history {
         ctx.system_prompt.as_str().to_string()
     } else {
         refreshed_new_session_system_prompt(ctx.as_ref())
     };
+    if let Some(identity_overlay) = public_peer_execution.identity_overlay.as_deref() {
+        let _ = write!(base_system_prompt, "\n\n{identity_overlay}");
+    }
     let mut system_prompt = build_channel_system_prompt(
         &base_system_prompt,
         &msg.channel,
@@ -7519,6 +7691,313 @@ BTC is currently around $65,000 based on latest tool output."#
                 .unwrap_or_else(|e| e.into_inner())
                 .as_slice(),
             &["route-model".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_uses_bound_peer_runtime_route_by_default() {
+        let workspace = make_workspace();
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let default_provider_impl = Arc::new(ModelCaptureProvider::default());
+        let default_provider: Arc<dyn Provider> = default_provider_impl.clone();
+        let peer_provider_impl = Arc::new(ModelCaptureProvider::default());
+        let peer_provider: Arc<dyn Provider> = peer_provider_impl.clone();
+
+        let mut provider_cache_seed: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        provider_cache_seed.insert("test-provider".to_string(), Arc::clone(&default_provider));
+        provider_cache_seed.insert("openrouter".to_string(), peer_provider);
+
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.workspace_dir = workspace.path().to_path_buf();
+        config
+            .model_routes
+            .push(zeroclaw_config::schema::ModelRouteConfig {
+                hint: "ops-runtime".to_string(),
+                provider: "openrouter".to_string(),
+                model: "peer-model".to_string(),
+                api_key: None,
+            });
+        config.peers.insert(
+            "ops".into(),
+            zeroclaw_config::schema::PeerConfig {
+                runtime_ref: Some("hint:ops-runtime".into()),
+                ..zeroclaw_config::schema::PeerConfig::default()
+            },
+        );
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "telegram".into(),
+                conversation: "chat-ops".into(),
+                peer: "ops".into(),
+            });
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: Arc::clone(&default_provider),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("default-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(config.workspace_dir.clone()),
+            prompt_config: Arc::new(config.clone()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(config.model_routes.clone()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-default-peer".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-default".to_string(),
+                content: "hello default peer".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        process_channel_message(
+            runtime_ctx,
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-bound-peer".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-ops".to_string(),
+                content: "hello bound peer".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 2,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(default_provider_impl.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(peer_provider_impl.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            default_provider_impl
+                .models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &["default-model".to_string()]
+        );
+        assert_eq!(
+            peer_provider_impl
+                .models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &["peer-model".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_applies_bound_peer_identity_overlay() {
+        let workspace = make_workspace();
+        std::fs::write(
+            workspace.path().join("peer-ops.md"),
+            "# Ops peer\nYou are the ops peer. Reply with an operational tone.",
+        )
+        .unwrap();
+
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(HistoryCaptureProvider::default());
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.workspace_dir = workspace.path().to_path_buf();
+        config.peers.insert(
+            "ops".into(),
+            zeroclaw_config::schema::PeerConfig {
+                identity_ref: Some("peer-ops.md".into()),
+                ..zeroclaw_config::schema::PeerConfig::default()
+            },
+        );
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "telegram".into(),
+                conversation: "chat-ops".into(),
+                peer: "ops".into(),
+            });
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("default-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(config.workspace_dir.clone()),
+            prompt_config: Arc::new(config.clone()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-default-identity".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-default".to_string(),
+                content: "hello default identity".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        process_channel_message(
+            runtime_ctx,
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-bound-identity".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-ops".to_string(),
+                content: "hello bound identity".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 2,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][0].0, "system");
+        assert_eq!(calls[1][0].0, "system");
+        assert!(
+            !calls[0][0].1.contains("You are the ops peer."),
+            "implicit default peer should keep the legacy system prompt"
+        );
+        assert!(
+            calls[1][0].1.contains("## Peer Identity Overlay"),
+            "bound peer should add an identity overlay section"
+        );
+        assert!(
+            calls[1][0]
+                .1
+                .contains("You are the ops peer. Reply with an operational tone."),
+            "bound peer should inject the referenced identity overlay content"
         );
     }
 
