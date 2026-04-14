@@ -429,6 +429,21 @@ pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> 
     }
 }
 
+fn peer_scoped_session_key(peer_id: &str, legacy_key: String) -> String {
+    if peer_id.eq_ignore_ascii_case(zeroclaw_config::schema::DEFAULT_PUBLIC_PEER_ID) {
+        legacy_key
+    } else {
+        format!("peer:{peer_id}::{legacy_key}")
+    }
+}
+
+fn conversation_history_key_for_public_peer(
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    resolved_public_peer: &zeroclaw_config::schema::ResolvedPublicPeer<'_>,
+) -> String {
+    peer_scoped_session_key(resolved_public_peer.peer_id, conversation_history_key(msg))
+}
+
 fn followup_thread_id(msg: &zeroclaw_api::channel::ChannelMessage) -> Option<String> {
     msg.thread_ts.clone().or_else(|| Some(msg.id.clone()))
 }
@@ -441,6 +456,13 @@ fn interruption_scope_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String
         Some(scope) => format!("{}_{}_{}_{}", msg.channel, conv, msg.sender, scope),
         None => format!("{}_{}_{}", msg.channel, conv, msg.sender),
     }
+}
+
+fn interruption_scope_key_for_public_peer(
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    resolved_public_peer: &zeroclaw_config::schema::ResolvedPublicPeer<'_>,
+) -> String {
+    peer_scoped_session_key(resolved_public_peer.peer_id, interruption_scope_key(msg))
 }
 
 fn resolve_public_peer_for_message<'a>(
@@ -1743,7 +1765,8 @@ async fn handle_runtime_command_if_needed(
         return true;
     };
 
-    let sender_key = conversation_history_key(msg);
+    let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), msg);
+    let sender_key = conversation_history_key_for_public_peer(msg, &resolved_public_peer);
     let mut current = get_route_selection(ctx, &sender_key);
 
     let response = match command {
@@ -2546,8 +2569,8 @@ async fn process_channel_message(
         return;
     }
 
-    let history_key = conversation_history_key(&msg);
     let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+    let history_key = conversation_history_key_for_public_peer(&msg, &resolved_public_peer);
     tracing::debug!(
         channel = %msg.channel,
         conversation = msg.canonical_conversation(),
@@ -3588,7 +3611,8 @@ async fn dispatch_worker(
     let interrupt_enabled = ctx
         .interrupt_on_new_message
         .enabled_for_channel(msg.channel.as_str());
-    let sender_scope_key = interruption_scope_key(&msg);
+    let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+    let sender_scope_key = interruption_scope_key_for_public_peer(&msg, &resolved_public_peer);
     let cancellation_token = CancellationToken::new();
     let completion = Arc::new(InFlightTaskCompletion::new());
     let task_id = task_sequence.fetch_add(1, Ordering::Relaxed);
@@ -3652,7 +3676,9 @@ async fn run_message_dispatch_loop(
         // spawning a worker or registering a new task. Handled here — before semaphore
         // acquisition — so the target task is still in the store and is never replaced.
         if msg.channel != "cli" && is_stop_command(&msg.content) {
-            let scope_key = interruption_scope_key(&msg);
+            let resolved_public_peer =
+                resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+            let scope_key = interruption_scope_key_for_public_peer(&msg, &resolved_public_peer);
             let previous = {
                 let mut active = in_flight_by_sender.lock().await;
                 active.remove(&scope_key)
@@ -3694,7 +3720,10 @@ async fn run_message_dispatch_loop(
         // ── Debounce: accumulate rapid messages per sender ──────────
         // CLI messages bypass debouncing so the interactive loop stays responsive.
         let msg = if msg.channel != "cli" && ctx.debouncer.enabled() {
-            let debounce_key = conversation_history_key(&msg);
+            let resolved_public_peer =
+                resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+            let debounce_key =
+                conversation_history_key_for_public_peer(&msg, &resolved_public_peer);
             match ctx.debouncer.debounce(&debounce_key, &msg.content).await {
                 zeroclaw_infra::debounce::DebounceResult::Pending(rx) => {
                     // Spawn a lightweight task that waits for the debounce window
@@ -9464,6 +9493,62 @@ BTC is currently around $65,000 based on latest tool output."#
     }
 
     #[test]
+    fn conversation_history_key_for_public_peer_preserves_default_peer_format() {
+        let config = Config::default();
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "msg_abc123".into(),
+            sender: "@alice:example.com".into(),
+            reply_target: "@alice:example.com||!room:example.com".into(),
+            content: "hello".into(),
+            channel: "matrix".into(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: Some("!room:example.com".into()),
+        };
+
+        let resolved = resolve_public_peer_for_message(&config, &msg);
+        assert_eq!(
+            conversation_history_key_for_public_peer(&msg, &resolved),
+            "matrix_!room:example.com_@alice:example.com"
+        );
+    }
+
+    #[test]
+    fn conversation_history_key_for_public_peer_prefixes_explicit_peer() {
+        let mut config = Config::default();
+        config
+            .peers
+            .insert("ops".into(), zeroclaw_config::schema::PeerConfig::default());
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "matrix".into(),
+                conversation: "!room:example.com".into(),
+                peer: "ops".into(),
+            });
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "msg_abc123".into(),
+            sender: "@alice:example.com".into(),
+            reply_target: "@alice:example.com||!room:example.com".into(),
+            content: "hello".into(),
+            channel: "matrix".into(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: Some("!room:example.com".into()),
+        };
+
+        let resolved = resolve_public_peer_for_message(&config, &msg);
+        assert_eq!(
+            conversation_history_key_for_public_peer(&msg, &resolved),
+            "peer:ops::matrix_!room:example.com_@alice:example.com"
+        );
+    }
+
+    #[test]
     fn resolve_public_peer_for_message_uses_canonical_conversation() {
         let mut config = Config::default();
         config
@@ -11782,6 +11867,62 @@ This is an example JSON object for profile settings."#;
         assert_eq!(
             interruption_scope_key(&msg),
             "matrix_!room:example.com_alice"
+        );
+    }
+
+    #[test]
+    fn interruption_scope_key_for_public_peer_preserves_default_peer_format() {
+        let config = Config::default();
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "1".into(),
+            sender: "alice".into(),
+            reply_target: "alice||!room:example.com".into(),
+            content: "hi".into(),
+            channel: "matrix".into(),
+            timestamp: 0,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: Some("!room:example.com".into()),
+        };
+
+        let resolved = resolve_public_peer_for_message(&config, &msg);
+        assert_eq!(
+            interruption_scope_key_for_public_peer(&msg, &resolved),
+            "matrix_!room:example.com_alice"
+        );
+    }
+
+    #[test]
+    fn interruption_scope_key_for_public_peer_prefixes_explicit_peer() {
+        let mut config = Config::default();
+        config
+            .peers
+            .insert("ops".into(), zeroclaw_config::schema::PeerConfig::default());
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "matrix".into(),
+                conversation: "!room:example.com".into(),
+                peer: "ops".into(),
+            });
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "1".into(),
+            sender: "alice".into(),
+            reply_target: "alice||!room:example.com".into(),
+            content: "hi".into(),
+            channel: "matrix".into(),
+            timestamp: 0,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: Some("!room:example.com".into()),
+        };
+
+        let resolved = resolve_public_peer_for_message(&config, &msg);
+        assert_eq!(
+            interruption_scope_key_for_public_peer(&msg, &resolved),
+            "peer:ops::matrix_!room:example.com_alice"
         );
     }
 
