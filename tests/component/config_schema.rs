@@ -4,8 +4,8 @@
 //! and gateway/security/agent config boundary conditions.
 
 use zeroclaw::config::{
-    AutonomyConfig, ChannelsConfig, Config, DEFAULT_PUBLIC_PEER_ID, GatewayConfig,
-    PeerBindingConfig, PeerConfig, SecurityConfig,
+    AutonomyConfig, ChannelsConfig, Config, DEFAULT_PUBLIC_PEER_ID, DelegateAgentConfig,
+    GatewayConfig, PeerBindingConfig, PeerConfig, SecurityConfig,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -200,6 +200,69 @@ fn explicit_peer_cannot_shadow_implicit_default_peer_id() {
         .validate()
         .expect_err("explicit default peer id should be reserved");
     assert!(err.to_string().contains("implicit legacy root peer id"));
+}
+
+#[test]
+fn resolve_public_peer_defaults_to_implicit_root_when_unbound() {
+    let config = Config::default();
+
+    let resolved = config.resolve_public_peer("discord", "thread:123");
+
+    assert_eq!(resolved.peer_id, DEFAULT_PUBLIC_PEER_ID);
+    assert!(resolved.is_default());
+    assert!(resolved.binding.is_none());
+    assert!(resolved.peer.is_none());
+}
+
+#[test]
+fn resolve_public_peer_returns_explicit_binding_for_matching_conversation() {
+    let mut config = Config::default();
+    config.peers.insert(
+        "ops".into(),
+        PeerConfig {
+            public: true,
+            description: Some("Ops peer".into()),
+            ..Default::default()
+        },
+    );
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: "ops".into(),
+    });
+
+    let resolved = config.resolve_public_peer("DISCORD", "thread:123");
+
+    assert_eq!(resolved.peer_id, "ops");
+    assert!(!resolved.is_default());
+    assert_eq!(resolved.binding.expect("binding").peer, "ops");
+    assert_eq!(
+        resolved.peer.and_then(|peer| peer.description.as_deref()),
+        Some("Ops peer")
+    );
+}
+
+#[test]
+fn binding_cannot_target_delegate_agent_name() {
+    let mut config = Config::default();
+    config.agents.insert(
+        "helper".into(),
+        DelegateAgentConfig {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            ..Default::default()
+        },
+    );
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: "helper".into(),
+    });
+
+    let err = config
+        .validate()
+        .expect_err("delegate agent names must not be bindable peers");
+    assert!(err.to_string().contains("unknown peer 'helper'"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

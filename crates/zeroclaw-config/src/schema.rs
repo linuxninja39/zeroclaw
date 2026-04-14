@@ -752,6 +752,24 @@ pub struct PeerBindingConfig {
     pub peer: String,
 }
 
+/// Resolved public peer selection for an inbound external conversation.
+#[derive(Debug, Clone)]
+pub struct ResolvedPublicPeer<'a> {
+    /// Selected public peer id. `default` is the implicit legacy root peer.
+    pub peer_id: &'a str,
+    /// Matching explicit binding, if one exists.
+    pub binding: Option<&'a PeerBindingConfig>,
+    /// Matching peer config for explicit non-default peers.
+    pub peer: Option<&'a PeerConfig>,
+}
+
+impl<'a> ResolvedPublicPeer<'a> {
+    /// Returns true when the implicit legacy root peer was selected.
+    pub fn is_default(&self) -> bool {
+        self.peer_id.eq_ignore_ascii_case(DEFAULT_PUBLIC_PEER_ID)
+    }
+}
+
 fn is_valid_peer_id(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {
@@ -9649,6 +9667,40 @@ impl Config {
             })
             .cloned()
             .collect()
+    }
+
+    /// Resolve the public peer selected for a `(channel, canonical conversation)` pair.
+    ///
+    /// Backward compatibility: when no explicit binding matches, this falls back to the
+    /// implicit legacy root peer (`default`). Channel matching is case-insensitive;
+    /// conversation matching is exact because canonical conversation ids are
+    /// channel-defined stable identifiers.
+    pub fn resolve_public_peer<'a>(
+        &'a self,
+        channel: &str,
+        conversation: &str,
+    ) -> ResolvedPublicPeer<'a> {
+        if let Some(binding) = self.bindings.iter().find(|binding| {
+            binding.channel.eq_ignore_ascii_case(channel) && binding.conversation == conversation
+        }) {
+            let peer_id = if binding.peer.eq_ignore_ascii_case(DEFAULT_PUBLIC_PEER_ID) {
+                DEFAULT_PUBLIC_PEER_ID
+            } else {
+                binding.peer.as_str()
+            };
+
+            return ResolvedPublicPeer {
+                peer_id,
+                binding: Some(binding),
+                peer: self.peers.get(peer_id),
+            };
+        }
+
+        ResolvedPublicPeer {
+            peer_id: DEFAULT_PUBLIC_PEER_ID,
+            binding: None,
+            peer: None,
+        }
     }
 
     pub async fn load_or_init() -> Result<Self> {

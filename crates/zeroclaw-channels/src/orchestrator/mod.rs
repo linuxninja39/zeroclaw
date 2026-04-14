@@ -443,6 +443,13 @@ fn interruption_scope_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String
     }
 }
 
+fn resolve_public_peer_for_message<'a>(
+    config: &'a Config,
+    msg: &'a zeroclaw_api::channel::ChannelMessage,
+) -> zeroclaw_config::schema::ResolvedPublicPeer<'a> {
+    config.resolve_public_peer(&msg.channel, msg.canonical_conversation())
+}
+
 /// Returns `true` when `content` is a `/stop` command (with optional `@botname` suffix).
 /// Not gated on channel type — all non-CLI channels support `/stop`.
 fn is_stop_command(content: &str) -> bool {
@@ -2540,6 +2547,14 @@ async fn process_channel_message(
     }
 
     let history_key = conversation_history_key(&msg);
+    let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+    tracing::debug!(
+        channel = %msg.channel,
+        conversation = msg.canonical_conversation(),
+        public_peer = resolved_public_peer.peer_id,
+        explicit_binding = resolved_public_peer.binding.is_some(),
+        "Resolved public peer for inbound channel message"
+    );
     let mut route = get_route_selection(ctx.as_ref(), &history_key);
 
     // ── Query classification: override route when a rule matches ──
@@ -9446,6 +9461,68 @@ BTC is currently around $65,000 based on latest tool output."#
             conversation_history_key(&msg),
             "matrix_!room:example.com_@alice:example.com"
         );
+    }
+
+    #[test]
+    fn resolve_public_peer_for_message_uses_canonical_conversation() {
+        let mut config = Config::default();
+        config
+            .peers
+            .insert("ops".into(), zeroclaw_config::schema::PeerConfig::default());
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "matrix".into(),
+                conversation: "!room:example.com".into(),
+                peer: "ops".into(),
+            });
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "msg_abc123".into(),
+            sender: "@alice:example.com".into(),
+            reply_target: "@alice:example.com||!room:example.com".into(),
+            content: "hello".into(),
+            channel: "matrix".into(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: Some("!room:example.com".into()),
+        };
+
+        let resolved = resolve_public_peer_for_message(&config, &msg);
+        assert_eq!(resolved.peer_id, "ops");
+        assert!(resolved.binding.is_some());
+    }
+
+    #[test]
+    fn resolve_public_peer_for_message_falls_back_to_legacy_reply_target() {
+        let mut config = Config::default();
+        config
+            .peers
+            .insert("ops".into(), zeroclaw_config::schema::PeerConfig::default());
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "discord".into(),
+                conversation: "C123".into(),
+                peer: "ops".into(),
+            });
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "slack_C123_1741234567.123456".into(),
+            sender: "U123".into(),
+            reply_target: "C123".into(),
+            content: "hello".into(),
+            channel: "discord".into(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: None,
+        };
+
+        let resolved = resolve_public_peer_for_message(&config, &msg);
+        assert_eq!(resolved.peer_id, "ops");
+        assert!(resolved.binding.is_some());
     }
 
     #[test]
