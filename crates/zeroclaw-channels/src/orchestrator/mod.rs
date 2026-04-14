@@ -472,6 +472,43 @@ fn resolve_public_peer_for_message<'a>(
     config.resolve_public_peer(&msg.channel, msg.canonical_conversation())
 }
 
+#[derive(Debug, Clone)]
+struct PublicPeerDispatchRequest {
+    msg: zeroclaw_api::channel::ChannelMessage,
+    target_public_peer: Option<String>,
+}
+
+impl PublicPeerDispatchRequest {
+    fn inbound(msg: zeroclaw_api::channel::ChannelMessage) -> Self {
+        Self {
+            msg,
+            target_public_peer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn targeted(
+        msg: zeroclaw_api::channel::ChannelMessage,
+        target_public_peer: impl Into<String>,
+    ) -> Self {
+        Self {
+            msg,
+            target_public_peer: Some(target_public_peer.into()),
+        }
+    }
+}
+
+fn resolve_public_peer_for_dispatch<'a>(
+    config: &'a Config,
+    msg: &'a zeroclaw_api::channel::ChannelMessage,
+    target_public_peer: Option<&'a str>,
+) -> Result<zeroclaw_config::schema::ResolvedPublicPeer<'a>> {
+    match target_public_peer {
+        Some(peer_id) => config.resolve_explicit_public_peer(peer_id),
+        None => Ok(resolve_public_peer_for_message(config, msg)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct PublicPeerExecutionContext {
     peer_id: String,
@@ -1910,6 +1947,7 @@ fn build_config_block_kit(
 async fn handle_runtime_command_if_needed(
     ctx: &ChannelRuntimeContext,
     msg: &zeroclaw_api::channel::ChannelMessage,
+    target_public_peer: Option<&str>,
     target_channel: Option<&Arc<dyn Channel>>,
 ) -> bool {
     let Some(command) = parse_runtime_command(&msg.channel, &msg.content) else {
@@ -1920,7 +1958,20 @@ async fn handle_runtime_command_if_needed(
         return true;
     };
 
-    let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), msg);
+    let resolved_public_peer =
+        match resolve_public_peer_for_dispatch(ctx.prompt_config.as_ref(), msg, target_public_peer)
+        {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    channel = %msg.channel,
+                    conversation = msg.canonical_conversation(),
+                    target_public_peer,
+                    "Failed to resolve public peer for runtime command: {err}"
+                );
+                return true;
+            }
+        };
     let public_peer_execution = resolve_public_peer_execution_context(ctx, &resolved_public_peer);
     let sender_key = conversation_history_key_for_public_peer(msg, &resolved_public_peer);
     let default_route = effective_default_route_selection(ctx, &public_peer_execution);
@@ -2641,11 +2692,30 @@ fn spawn_scoped_typing_task(
     })
 }
 
+#[cfg(test)]
 async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
     cancellation_token: CancellationToken,
 ) {
+    process_public_peer_dispatch(
+        ctx,
+        PublicPeerDispatchRequest::inbound(msg),
+        cancellation_token,
+    )
+    .await;
+}
+
+async fn process_public_peer_dispatch(
+    ctx: Arc<ChannelRuntimeContext>,
+    dispatch: PublicPeerDispatchRequest,
+    cancellation_token: CancellationToken,
+) {
+    let PublicPeerDispatchRequest {
+        msg,
+        target_public_peer,
+    } = dispatch;
+
     if cancellation_token.is_cancelled() {
         return;
     }
@@ -2669,6 +2739,7 @@ async fn process_channel_message(
             "message_id": msg.id,
             "reply_target": msg.reply_target,
             "content_preview": truncate_with_ellipsis(&msg.content, 160),
+            "target_public_peer": target_public_peer,
         }),
     );
 
@@ -2729,11 +2800,33 @@ async fn process_channel_message(
     if let Err(err) = maybe_apply_runtime_config_update(ctx.as_ref()).await {
         tracing::warn!("Failed to apply runtime config update: {err}");
     }
-    if handle_runtime_command_if_needed(ctx.as_ref(), &msg, target_channel.as_ref()).await {
+    if handle_runtime_command_if_needed(
+        ctx.as_ref(),
+        &msg,
+        target_public_peer.as_deref(),
+        target_channel.as_ref(),
+    )
+    .await
+    {
         return;
     }
 
-    let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
+    let resolved_public_peer = match resolve_public_peer_for_dispatch(
+        ctx.prompt_config.as_ref(),
+        &msg,
+        target_public_peer.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            tracing::warn!(
+                channel = %msg.channel,
+                conversation = msg.canonical_conversation(),
+                target_public_peer = target_public_peer.as_deref(),
+                "Failed to resolve public peer for dispatch: {err}"
+            );
+            return;
+        }
+    };
     let public_peer_execution =
         resolve_public_peer_execution_context(ctx.as_ref(), &resolved_public_peer);
     let history_key = conversation_history_key_for_public_peer(&msg, &resolved_public_peer);
@@ -2743,9 +2836,10 @@ async fn process_channel_message(
         conversation = msg.canonical_conversation(),
         public_peer = resolved_public_peer.peer_id,
         explicit_binding = resolved_public_peer.binding.is_some(),
+        explicit_target = target_public_peer.is_some(),
         peer_runtime_overlay = public_peer_execution.default_route.is_some(),
         peer_identity_overlay = public_peer_execution.identity_overlay.is_some(),
-        "Resolved public peer for inbound channel message"
+        "Resolved public peer for channel dispatch"
     );
     let mut route = get_route_selection(ctx.as_ref(), &history_key, &default_route);
 
@@ -3774,7 +3868,7 @@ async fn process_channel_message(
 /// can reuse the same in-flight tracking / cancellation / process logic.
 async fn dispatch_worker(
     ctx: Arc<ChannelRuntimeContext>,
-    msg: zeroclaw_api::channel::ChannelMessage,
+    dispatch: PublicPeerDispatchRequest,
     in_flight: Arc<tokio::sync::Mutex<HashMap<String, InFlightSenderTaskState>>>,
     task_sequence: Arc<AtomicU64>,
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -3782,14 +3876,30 @@ async fn dispatch_worker(
     let _permit = permit;
     let interrupt_enabled = ctx
         .interrupt_on_new_message
-        .enabled_for_channel(msg.channel.as_str());
-    let resolved_public_peer = resolve_public_peer_for_message(ctx.prompt_config.as_ref(), &msg);
-    let sender_scope_key = interruption_scope_key_for_public_peer(&msg, &resolved_public_peer);
+        .enabled_for_channel(dispatch.msg.channel.as_str());
+    let resolved_public_peer = match resolve_public_peer_for_dispatch(
+        ctx.prompt_config.as_ref(),
+        &dispatch.msg,
+        dispatch.target_public_peer.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            tracing::warn!(
+                channel = %dispatch.msg.channel,
+                conversation = dispatch.msg.canonical_conversation(),
+                target_public_peer = dispatch.target_public_peer.as_deref(),
+                "Failed to resolve public peer for worker dispatch: {err}"
+            );
+            return;
+        }
+    };
+    let sender_scope_key =
+        interruption_scope_key_for_public_peer(&dispatch.msg, &resolved_public_peer);
     let cancellation_token = CancellationToken::new();
     let completion = Arc::new(InFlightTaskCompletion::new());
     let task_id = task_sequence.fetch_add(1, Ordering::Relaxed);
 
-    let register_in_flight = msg.channel != "cli";
+    let register_in_flight = dispatch.msg.channel != "cli";
 
     if register_in_flight {
         let previous = {
@@ -3806,8 +3916,9 @@ async fn dispatch_worker(
 
         if interrupt_enabled && let Some(previous) = previous {
             tracing::info!(
-                channel = %msg.channel,
-                sender = %msg.sender,
+                channel = %dispatch.msg.channel,
+                sender = %dispatch.msg.sender,
+                target_public_peer = dispatch.target_public_peer.as_deref(),
                 "Interrupting previous in-flight request for sender"
             );
             previous.cancellation.cancel();
@@ -3815,7 +3926,7 @@ async fn dispatch_worker(
         }
     }
 
-    process_channel_message(ctx, msg, cancellation_token).await;
+    process_public_peer_dispatch(ctx, dispatch, cancellation_token).await;
 
     if register_in_flight {
         let mut active = in_flight.lock().await;
@@ -3928,7 +4039,7 @@ async fn run_message_dispatch_loop(
 
                         dispatch_worker(
                             debounce_ctx,
-                            debounce_msg,
+                            PublicPeerDispatchRequest::inbound(debounce_msg),
                             debounce_in_flight,
                             debounce_task_seq,
                             permit,
@@ -3956,7 +4067,14 @@ async fn run_message_dispatch_loop(
         let in_flight = Arc::clone(&in_flight_by_sender);
         let task_sequence = Arc::clone(&task_sequence);
         workers.spawn(async move {
-            dispatch_worker(worker_ctx, msg, in_flight, task_sequence, permit).await;
+            dispatch_worker(
+                worker_ctx,
+                PublicPeerDispatchRequest::inbound(msg),
+                in_flight,
+                task_sequence,
+                permit,
+            )
+            .await;
         });
 
         while let Some(result) = workers.try_join_next() {
@@ -7852,6 +7970,187 @@ BTC is currently around $65,000 based on latest tool output."#
     }
 
     #[tokio::test]
+    async fn process_public_peer_dispatch_targets_explicit_peer_without_binding() {
+        let workspace = make_workspace();
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let default_provider_impl = Arc::new(ModelCaptureProvider::default());
+        let default_provider: Arc<dyn Provider> = default_provider_impl.clone();
+        let peer_provider_impl = Arc::new(ModelCaptureProvider::default());
+        let peer_provider: Arc<dyn Provider> = peer_provider_impl.clone();
+
+        let mut provider_cache_seed: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        provider_cache_seed.insert("test-provider".to_string(), Arc::clone(&default_provider));
+        provider_cache_seed.insert("openrouter".to_string(), peer_provider);
+
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.workspace_dir = workspace.path().to_path_buf();
+        config
+            .model_routes
+            .push(zeroclaw_config::schema::ModelRouteConfig {
+                hint: "ops-runtime".to_string(),
+                provider: "openrouter".to_string(),
+                model: "peer-model".to_string(),
+                api_key: None,
+            });
+        config.peers.insert(
+            "ops".into(),
+            zeroclaw_config::schema::PeerConfig {
+                public: true,
+                runtime_ref: Some("hint:ops-runtime".into()),
+                ..zeroclaw_config::schema::PeerConfig::default()
+            },
+        );
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: Arc::clone(&default_provider),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("default-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(config.workspace_dir.clone()),
+            prompt_config: Arc::new(config.clone()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(config.model_routes.clone()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        let targeted_msg = zeroclaw_api::channel::ChannelMessage {
+            id: "msg-explicit-peer".to_string(),
+            sender: "alice".to_string(),
+            reply_target: "chat-default".to_string(),
+            content: "hello explicit peer".to_string(),
+            channel: "telegram".to_string(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: None,
+        };
+
+        process_public_peer_dispatch(
+            runtime_ctx.clone(),
+            PublicPeerDispatchRequest::targeted(targeted_msg, "ops"),
+            CancellationToken::new(),
+        )
+        .await;
+
+        {
+            let histories = runtime_ctx
+                .conversation_histories
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            assert!(
+                histories
+                    .peek("peer:ops::telegram_chat-default_alice")
+                    .is_some(),
+                "explicit peer dispatch should store history under the targeted peer scope"
+            );
+            assert!(
+                histories.peek("telegram_chat-default_alice").is_none(),
+                "explicit peer dispatch must not reuse the legacy default history key"
+            );
+        }
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-default-peer".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-default".to_string(),
+                content: "hello default peer".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 2,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(default_provider_impl.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(peer_provider_impl.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            default_provider_impl
+                .models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &["default-model".to_string()]
+        );
+        assert_eq!(
+            peer_provider_impl
+                .models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &["peer-model".to_string()]
+        );
+
+        let histories = runtime_ctx
+            .conversation_histories
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            histories
+                .peek("peer:ops::telegram_chat-default_alice")
+                .is_some()
+        );
+        assert!(histories.peek("telegram_chat-default_alice").is_some());
+    }
+
+    #[tokio::test]
     async fn process_channel_message_applies_bound_peer_identity_overlay() {
         let workspace = make_workspace();
         std::fs::write(
@@ -10087,6 +10386,93 @@ BTC is currently around $65,000 based on latest tool output."#
         let resolved = resolve_public_peer_for_message(&config, &msg);
         assert_eq!(resolved.peer_id, "ops");
         assert!(resolved.binding.is_some());
+    }
+
+    #[test]
+    fn resolve_public_peer_for_dispatch_prefers_explicit_target_over_binding() {
+        let mut config = Config::default();
+        config.peers.insert(
+            "ops".into(),
+            zeroclaw_config::schema::PeerConfig {
+                public: true,
+                ..Default::default()
+            },
+        );
+        config.peers.insert(
+            "alerts".into(),
+            zeroclaw_config::schema::PeerConfig {
+                public: true,
+                ..Default::default()
+            },
+        );
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "matrix".into(),
+                conversation: "!room:example.com".into(),
+                peer: "ops".into(),
+            });
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            id: "msg_abc123".into(),
+            sender: "@alice:example.com".into(),
+            reply_target: "@alice:example.com||!room:example.com".into(),
+            content: "hello".into(),
+            channel: "matrix".into(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            conversation: Some("!room:example.com".into()),
+        };
+
+        let resolved = resolve_public_peer_for_dispatch(&config, &msg, Some("alerts"))
+            .expect("explicit target should resolve");
+
+        assert_eq!(resolved.peer_id, "alerts");
+        assert!(resolved.binding.is_none());
+    }
+
+    #[test]
+    fn targeted_dispatch_uses_explicit_peer_for_history_and_interrupt_scopes() {
+        let mut config = Config::default();
+        config.peers.insert(
+            "ops".into(),
+            zeroclaw_config::schema::PeerConfig {
+                public: true,
+                ..Default::default()
+            },
+        );
+        let dispatch = PublicPeerDispatchRequest::targeted(
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg_abc123".into(),
+                sender: "@alice:example.com".into(),
+                reply_target: "@alice:example.com||!room:example.com".into(),
+                content: "hello".into(),
+                channel: "matrix".into(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: Some("!room:example.com".into()),
+            },
+            "ops",
+        );
+
+        let resolved = resolve_public_peer_for_dispatch(
+            &config,
+            &dispatch.msg,
+            dispatch.target_public_peer.as_deref(),
+        )
+        .expect("targeted dispatch should resolve");
+
+        assert_eq!(
+            conversation_history_key_for_public_peer(&dispatch.msg, &resolved),
+            "peer:ops::matrix_!room:example.com_@alice:example.com"
+        );
+        assert_eq!(
+            interruption_scope_key_for_public_peer(&dispatch.msg, &resolved),
+            "peer:ops::matrix_!room:example.com_@alice:example.com"
+        );
     }
 
     #[test]

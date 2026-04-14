@@ -243,6 +243,71 @@ fn resolve_public_peer_returns_explicit_binding_for_matching_conversation() {
 }
 
 #[test]
+fn resolve_explicit_public_peer_returns_named_public_peer() {
+    let mut config = Config::default();
+    config.peers.insert(
+        "ops".into(),
+        PeerConfig {
+            public: true,
+            description: Some("Ops peer".into()),
+            ..Default::default()
+        },
+    );
+
+    let resolved = config
+        .resolve_explicit_public_peer("ops")
+        .expect("explicit public peer should resolve");
+
+    assert_eq!(resolved.peer_id, "ops");
+    assert!(resolved.binding.is_none());
+    assert_eq!(
+        resolved.peer.and_then(|peer| peer.description.as_deref()),
+        Some("Ops peer")
+    );
+}
+
+#[test]
+fn resolve_explicit_public_peer_accepts_implicit_default_peer() {
+    let config = Config::default();
+
+    let resolved = config
+        .resolve_explicit_public_peer("DEFAULT")
+        .expect("implicit default peer should remain a valid explicit target");
+
+    assert_eq!(resolved.peer_id, DEFAULT_PUBLIC_PEER_ID);
+    assert!(resolved.is_default());
+    assert!(resolved.binding.is_none());
+    assert!(resolved.peer.is_none());
+}
+
+#[test]
+fn resolve_explicit_public_peer_rejects_private_peer() {
+    let mut config = Config::default();
+    config.peers.insert(
+        "ops".into(),
+        PeerConfig {
+            public: false,
+            ..Default::default()
+        },
+    );
+
+    let err = config
+        .resolve_explicit_public_peer("ops")
+        .expect_err("private peers must not resolve as public targets");
+    assert!(err.to_string().contains("is not public"));
+}
+
+#[test]
+fn resolve_explicit_public_peer_rejects_unknown_peer() {
+    let config = Config::default();
+
+    let err = config
+        .resolve_explicit_public_peer("ops")
+        .expect_err("unknown explicit public peers must be rejected");
+    assert!(err.to_string().contains("is unknown"));
+}
+
+#[test]
 fn binding_cannot_target_delegate_agent_name() {
     let mut config = Config::default();
     config.agents.insert(

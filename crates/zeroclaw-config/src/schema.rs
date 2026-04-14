@@ -9703,6 +9703,49 @@ impl Config {
         }
     }
 
+    /// Resolve an explicitly targeted public peer for internal dispatch.
+    ///
+    /// This bypasses external conversation bindings and is intended for
+    /// same-host runtime/orchestrator flows that need to address a specific
+    /// top-level public peer directly.
+    pub fn resolve_explicit_public_peer<'a>(
+        &'a self,
+        peer_id: &'a str,
+    ) -> Result<ResolvedPublicPeer<'a>> {
+        let trimmed = peer_id.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("explicit public peer target must not be empty");
+        }
+        if trimmed != peer_id {
+            anyhow::bail!(
+                "explicit public peer target must not include leading/trailing whitespace"
+            );
+        }
+        if trimmed.eq_ignore_ascii_case(DEFAULT_PUBLIC_PEER_ID) {
+            return Ok(ResolvedPublicPeer {
+                peer_id: DEFAULT_PUBLIC_PEER_ID,
+                binding: None,
+                peer: None,
+            });
+        }
+
+        let Some(peer) = self.peers.get(trimmed) else {
+            anyhow::bail!(
+                "explicit public peer target '{trimmed}' is unknown; configure peers.{trimmed} or use '{}' for the implicit legacy root peer",
+                DEFAULT_PUBLIC_PEER_ID
+            );
+        };
+        if !peer.public {
+            anyhow::bail!("explicit public peer target '{trimmed}' is not public");
+        }
+
+        Ok(ResolvedPublicPeer {
+            peer_id: trimmed,
+            binding: None,
+            peer: Some(peer),
+        })
+    }
+
     pub async fn load_or_init() -> Result<Self> {
         let (default_zeroclaw_dir, default_workspace_dir) = default_config_and_workspace_dirs()?;
 
