@@ -7,32 +7,33 @@ pub use schema::{
     BrowserComputerUseConfig, BrowserConfig, BuiltinHooksConfig, ChannelsConfig,
     ClassificationRule, ClaudeCodeConfig, ClaudeCodeRunnerConfig, CloudOpsConfig, CodexCliConfig,
     ComposioConfig, Config, ConversationalAiConfig, CostConfig, CronConfig, CronJobDecl,
-    CronScheduleDecl, DEFAULT_GWS_SERVICES, DataRetentionConfig, DeepgramSttConfig,
-    DelegateAgentConfig, DelegateToolConfig, DiscordConfig, DockerRuntimeConfig, EdgeTtsConfig,
-    ElevenLabsTtsConfig, EmbeddingRouteConfig, EstopConfig, FeishuConfig, GatewayConfig,
-    GeminiCliConfig, GoogleSttConfig, GoogleTtsConfig, GoogleWorkspaceAllowedOperation,
-    GoogleWorkspaceConfig, HardwareConfig, HardwareTransport, HeartbeatConfig, HooksConfig,
-    HttpRequestConfig, IMessageConfig, IdentityConfig, ImageGenConfig, ImageProviderDalleConfig,
-    ImageProviderFluxConfig, ImageProviderImagenConfig, ImageProviderStabilityConfig, JiraConfig,
-    KnowledgeConfig, LarkConfig, LinkEnricherConfig, LinkedInConfig, LinkedInContentConfig,
-    LinkedInImageConfig, LocalWhisperConfig, MatrixConfig, McpConfig, McpServerConfig,
-    McpTransport, MediaPipelineConfig, MemoryConfig, MemoryPolicyConfig, Microsoft365Config,
-    ModelRouteConfig, MqttConfig, MultimodalConfig, NextcloudTalkConfig, NodeTransportConfig,
-    NodesConfig, NotionConfig, ObservabilityConfig, OpenAiSttConfig, OpenAiTtsConfig,
-    OpenCodeCliConfig, OpenVpnTunnelConfig, OtpConfig, OtpMethod, PacingConfig,
-    PeripheralBoardConfig, PeripheralsConfig, PipelineConfig, PiperTtsConfig, PluginsConfig,
-    ProjectIntelConfig, ProxyConfig, ProxyScope, QdrantConfig, QueryClassificationConfig,
-    ReliabilityConfig, ResourceLimitsConfig, RuntimeConfig, SandboxBackend, SandboxConfig,
-    SchedulerConfig, SearchMode, SecretsConfig, SecurityConfig, SecurityOpsConfig, ShellToolConfig,
-    SkillCreationConfig, SkillImprovementConfig, SkillsConfig, SkillsPromptInjectionMode,
-    SlackConfig, SopConfig, StorageConfig, StorageProviderConfig, StorageProviderSection,
-    StreamMode, SwarmConfig, SwarmStrategy, TelegramConfig, TextBrowserConfig, ToolFilterGroup,
-    ToolFilterGroupMode, TranscriptionConfig, TtsConfig, TunnelConfig, VerifiableIntentConfig,
-    WebFetchConfig, WebSearchConfig, WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode,
-    WorkspaceConfig, apply_channel_proxy_to_builder, apply_runtime_proxy_to_builder,
-    build_channel_proxy_client, build_channel_proxy_client_with_timeouts,
-    build_runtime_proxy_client, build_runtime_proxy_client_with_timeouts, runtime_proxy_config,
-    set_runtime_proxy_config, ws_connect_with_proxy,
+    CronScheduleDecl, DEFAULT_GWS_SERVICES, DEFAULT_PUBLIC_PEER_ID, DataRetentionConfig,
+    DeepgramSttConfig, DelegateAgentConfig, DelegateToolConfig, DiscordConfig, DockerRuntimeConfig,
+    EdgeTtsConfig, ElevenLabsTtsConfig, EmbeddingRouteConfig, EstopConfig, FeishuConfig,
+    GatewayConfig, GeminiCliConfig, GoogleSttConfig, GoogleTtsConfig,
+    GoogleWorkspaceAllowedOperation, GoogleWorkspaceConfig, HardwareConfig, HardwareTransport,
+    HeartbeatConfig, HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig,
+    ImageGenConfig, ImageProviderDalleConfig, ImageProviderFluxConfig, ImageProviderImagenConfig,
+    ImageProviderStabilityConfig, JiraConfig, KnowledgeConfig, LarkConfig, LinkEnricherConfig,
+    LinkedInConfig, LinkedInContentConfig, LinkedInImageConfig, LocalWhisperConfig, MatrixConfig,
+    McpConfig, McpServerConfig, McpTransport, MediaPipelineConfig, MemoryConfig,
+    MemoryPolicyConfig, Microsoft365Config, ModelRouteConfig, MqttConfig, MultimodalConfig,
+    NextcloudTalkConfig, NodeTransportConfig, NodesConfig, NotionConfig, ObservabilityConfig,
+    OpenAiSttConfig, OpenAiTtsConfig, OpenCodeCliConfig, OpenVpnTunnelConfig, OtpConfig, OtpMethod,
+    PacingConfig, PeerBindingConfig, PeerConfig, PeripheralBoardConfig, PeripheralsConfig,
+    PipelineConfig, PiperTtsConfig, PluginsConfig, ProjectIntelConfig, ProxyConfig, ProxyScope,
+    QdrantConfig, QueryClassificationConfig, ReliabilityConfig, ResourceLimitsConfig,
+    RuntimeConfig, SandboxBackend, SandboxConfig, SchedulerConfig, SearchMode, SecretsConfig,
+    SecurityConfig, SecurityOpsConfig, ShellToolConfig, SkillCreationConfig,
+    SkillImprovementConfig, SkillsConfig, SkillsPromptInjectionMode, SlackConfig, SopConfig,
+    StorageConfig, StorageProviderConfig, StorageProviderSection, StreamMode, SwarmConfig,
+    SwarmStrategy, TelegramConfig, TextBrowserConfig, ToolFilterGroup, ToolFilterGroupMode,
+    TranscriptionConfig, TtsConfig, TunnelConfig, VerifiableIntentConfig, WebFetchConfig,
+    WebSearchConfig, WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode, WorkspaceConfig,
+    apply_channel_proxy_to_builder, apply_runtime_proxy_to_builder, build_channel_proxy_client,
+    build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,
+    build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
+    ws_connect_with_proxy,
 };
 
 pub use traits::HasPropKind;
@@ -195,7 +196,11 @@ fn parse_prop_value(value_str: &str, kind: PropKind) -> anyhow::Result<toml::Val
                 )
             })?;
             match parsed {
-                toml::Value::Array(items) if items.iter().all(|item| matches!(item, toml::Value::String(_))) => {
+                toml::Value::Array(items)
+                    if items
+                        .iter()
+                        .all(|item| matches!(item, toml::Value::String(_))) =>
+                {
                     Ok(toml::Value::Array(items))
                 }
                 _ => anyhow::bail!(

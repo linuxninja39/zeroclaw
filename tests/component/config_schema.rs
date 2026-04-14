@@ -3,7 +3,10 @@
 //! Validates: config defaults, backward compatibility, invalid input rejection,
 //! and gateway/security/agent config boundary conditions.
 
-use zeroclaw::config::{AutonomyConfig, ChannelsConfig, Config, GatewayConfig, SecurityConfig};
+use zeroclaw::config::{
+    AutonomyConfig, ChannelsConfig, Config, DEFAULT_PUBLIC_PEER_ID, GatewayConfig,
+    PeerBindingConfig, PeerConfig, SecurityConfig,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Invalid value fail-fast
@@ -94,6 +97,109 @@ port = 99999
 "#;
     let result: Result<Config, _> = toml::from_str(toml_str);
     assert!(result.is_err(), "port > 65535 should fail for u16");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Peer / binding compatibility tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn peer_sections_are_optional_for_backward_compatibility() {
+    let parsed: Config =
+        toml::from_str("default_temperature = 0.7\n").expect("minimal TOML should parse");
+
+    assert!(parsed.peers.is_empty(), "peers should default to empty");
+    assert!(
+        parsed.bindings.is_empty(),
+        "bindings should default to empty"
+    );
+    parsed
+        .validate()
+        .expect("config without peers/bindings should remain valid");
+}
+
+#[test]
+fn binding_to_implicit_default_peer_is_valid() {
+    let mut config = Config::default();
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: DEFAULT_PUBLIC_PEER_ID.into(),
+    });
+
+    config
+        .validate()
+        .expect("binding to implicit default peer should be valid");
+}
+
+#[test]
+fn binding_to_unknown_peer_fails_validation() {
+    let mut config = Config::default();
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: "missing-peer".into(),
+    });
+
+    let err = config
+        .validate()
+        .expect_err("unknown peer binding should fail");
+    assert!(err.to_string().contains("unknown peer 'missing-peer'"));
+}
+
+#[test]
+fn binding_to_private_peer_fails_validation() {
+    let mut config = Config::default();
+    config.peers.insert(
+        "peer_a".into(),
+        PeerConfig {
+            public: false,
+            ..Default::default()
+        },
+    );
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: "peer_a".into(),
+    });
+
+    let err = config
+        .validate()
+        .expect_err("private peer binding should fail");
+    assert!(err.to_string().contains("that peer is not public"));
+}
+
+#[test]
+fn duplicate_binding_targets_fail_validation() {
+    let mut config = Config::default();
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: DEFAULT_PUBLIC_PEER_ID.into(),
+    });
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: DEFAULT_PUBLIC_PEER_ID.into(),
+    });
+
+    let err = config
+        .validate()
+        .expect_err("duplicate binding target should fail");
+    assert!(err.to_string().contains("duplicates an existing binding"));
+}
+
+#[test]
+fn explicit_peer_cannot_shadow_implicit_default_peer_id() {
+    let mut config = Config::default();
+    config
+        .peers
+        .insert(DEFAULT_PUBLIC_PEER_ID.into(), PeerConfig::default());
+
+    let err = config
+        .validate()
+        .expect_err("explicit default peer id should be reserved");
+    assert!(err.to_string().contains("implicit legacy root peer id"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -7,7 +7,9 @@
 //! and config file round-trips to verify workspace discovery and persistence.
 
 use std::fs;
-use zeroclaw::config::{AgentConfig, Config, MemoryConfig};
+use zeroclaw::config::{
+    AgentConfig, Config, DEFAULT_PUBLIC_PEER_ID, MemoryConfig, PeerBindingConfig, PeerConfig,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config default construction
@@ -164,6 +166,55 @@ fn config_toml_roundtrip_preserves_memory_config() {
     assert_eq!(parsed.memory.embedding_model, "text-embedding-3-small");
     assert!((parsed.memory.vector_weight - 0.8).abs() < f64::EPSILON);
     assert!((parsed.memory.keyword_weight - 0.2).abs() < f64::EPSILON);
+}
+
+#[test]
+fn config_default_toml_omits_empty_peer_sections() {
+    let config = Config::default();
+    let toml_str = toml::to_string(&config).expect("config should serialize to TOML");
+
+    assert!(
+        !toml_str.contains("[peers.")
+            && !toml_str.contains("[[bindings]]")
+            && !toml_str.contains("bindings = []"),
+        "empty peer sections should be omitted from serialized config: {toml_str}"
+    );
+}
+
+#[test]
+fn config_toml_roundtrip_preserves_explicit_peers_and_bindings() {
+    let mut config = Config::default();
+    config.peers.insert(
+        "peer_a".into(),
+        PeerConfig {
+            public: true,
+            description: Some("Primary peer".into()),
+            identity_ref: Some("identities/peer_a.md".into()),
+            runtime_ref: Some("runtime.peer-a".into()),
+        },
+    );
+    config.bindings.push(PeerBindingConfig {
+        channel: "discord".into(),
+        conversation: "thread:123".into(),
+        peer: "peer_a".into(),
+    });
+    config.bindings.push(PeerBindingConfig {
+        channel: "matrix".into(),
+        conversation: "room:!ops:example.org".into(),
+        peer: DEFAULT_PUBLIC_PEER_ID.into(),
+    });
+
+    let toml_str = toml::to_string(&config).expect("config should serialize to TOML");
+    let parsed: Config = toml::from_str(&toml_str).expect("TOML should deserialize back");
+
+    let peer = parsed.peers.get("peer_a").expect("peer_a should roundtrip");
+    assert!(peer.public);
+    assert_eq!(peer.description.as_deref(), Some("Primary peer"));
+    assert_eq!(peer.identity_ref.as_deref(), Some("identities/peer_a.md"));
+    assert_eq!(peer.runtime_ref.as_deref(), Some("runtime.peer-a"));
+    assert_eq!(parsed.bindings.len(), 2);
+    assert_eq!(parsed.bindings[0].peer, "peer_a");
+    assert_eq!(parsed.bindings[1].peer, DEFAULT_PUBLIC_PEER_ID);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

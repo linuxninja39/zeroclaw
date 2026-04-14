@@ -378,6 +378,22 @@ pub struct Config {
     #[nested]
     pub agents: HashMap<String, DelegateAgentConfig>,
 
+    /// Optional first-class public peers layered on top of the implicit legacy root.
+    ///
+    /// Backward compatibility: when omitted, ZeroClaw synthesizes the implicit
+    /// default/root peer from the existing top-level config and preserves
+    /// current single-root behavior.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub peers: HashMap<String, PeerConfig>,
+
+    /// Optional explicit external conversation bindings.
+    ///
+    /// Backward compatibility: when omitted, inbound channel traffic continues
+    /// to route to the implicit default/root peer using legacy behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<PeerBindingConfig>,
+
     /// Swarm configurations for multi-agent orchestration.
     #[serde(default)]
     pub swarms: HashMap<String, SwarmConfig>,
@@ -687,6 +703,62 @@ fn default_delegate_timeout_secs() -> u64 {
 
 fn default_delegate_agentic_timeout_secs() -> u64 {
     DEFAULT_DELEGATE_AGENTIC_TIMEOUT_SECS
+}
+
+// ── Peers / Bound Conversations ─────────────────────────────────
+
+/// Reserved implicit peer id synthesized from the legacy top-level config.
+pub const DEFAULT_PUBLIC_PEER_ID: &str = "default";
+
+/// Explicit public peer layered on top of the implicit legacy root peer.
+#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "peer"]
+pub struct PeerConfig {
+    /// Whether this peer is externally routable/listable. Default: true.
+    #[serde(default = "default_true")]
+    pub public: bool,
+    /// Optional human-readable description for operators/docs.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Optional identity/persona reference (path, key, or profile id).
+    #[serde(default)]
+    pub identity_ref: Option<String>,
+    /// Optional runtime/profile reference used when instantiating the peer.
+    #[serde(default)]
+    pub runtime_ref: Option<String>,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            public: default_true(),
+            description: None,
+            identity_ref: None,
+            runtime_ref: None,
+        }
+    }
+}
+
+/// Explicit binding from an external conversation surface to a public peer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+pub struct PeerBindingConfig {
+    /// Channel / transport name (for example: `discord`, `matrix`).
+    pub channel: String,
+    /// Canonical external conversation identifier within the channel.
+    pub conversation: String,
+    /// Target public peer id. `default` refers to the implicit legacy root peer.
+    pub peer: String,
+}
+
+fn is_valid_peer_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 // ── Swarms ──────────────────────────────────────────────────────
@@ -9083,6 +9155,8 @@ impl Default for Config {
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
             agents: HashMap::new(),
+            peers: HashMap::new(),
+            bindings: Vec::new(),
             swarms: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -9849,6 +9923,75 @@ impl Config {
                          only unreserved and sub-delim URI characters are allowed"
                     );
                 }
+            }
+        }
+
+        // Peers / bound conversations
+        for peer_id in self.peers.keys() {
+            let trimmed = peer_id.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("peers keys must not be empty");
+            }
+            if trimmed != peer_id {
+                anyhow::bail!(
+                    "peers.{peer_id} is invalid; peer ids must not include leading/trailing whitespace"
+                );
+            }
+            if trimmed.eq_ignore_ascii_case(DEFAULT_PUBLIC_PEER_ID) {
+                anyhow::bail!(
+                    "peers.{trimmed} is reserved; '{}' is the implicit legacy root peer id",
+                    DEFAULT_PUBLIC_PEER_ID
+                );
+            }
+            if !is_valid_peer_id(trimmed) {
+                anyhow::bail!("peers.{trimmed} is invalid; peer ids must match [a-z][a-z0-9_-]*");
+            }
+        }
+
+        let mut seen_bindings = std::collections::HashSet::new();
+        for (i, binding) in self.bindings.iter().enumerate() {
+            let channel = binding.channel.trim();
+            let conversation = binding.conversation.trim();
+            let peer = binding.peer.trim();
+
+            if channel.is_empty() {
+                anyhow::bail!("bindings[{i}].channel must not be empty");
+            }
+            if channel != binding.channel {
+                anyhow::bail!("bindings[{i}].channel must not include leading/trailing whitespace");
+            }
+            if conversation.is_empty() {
+                anyhow::bail!("bindings[{i}].conversation must not be empty");
+            }
+            if conversation != binding.conversation {
+                anyhow::bail!(
+                    "bindings[{i}].conversation must not include leading/trailing whitespace"
+                );
+            }
+            if peer.is_empty() {
+                anyhow::bail!("bindings[{i}].peer must not be empty");
+            }
+            if peer != binding.peer {
+                anyhow::bail!("bindings[{i}].peer must not include leading/trailing whitespace");
+            }
+            if !peer.eq_ignore_ascii_case(DEFAULT_PUBLIC_PEER_ID) && !self.peers.contains_key(peer)
+            {
+                anyhow::bail!(
+                    "bindings[{i}].peer references unknown peer '{peer}'; configure peers.{peer} or use '{}' for the implicit legacy root peer",
+                    DEFAULT_PUBLIC_PEER_ID
+                );
+            }
+            if let Some(peer_cfg) = self.peers.get(peer)
+                && !peer_cfg.public
+            {
+                anyhow::bail!("bindings[{i}] targets peers.{peer}, but that peer is not public");
+            }
+
+            let dedupe_key = (channel.to_ascii_lowercase(), conversation.to_string());
+            if !seen_bindings.insert(dedupe_key) {
+                anyhow::bail!(
+                    "bindings[{i}] duplicates an existing binding for channel '{channel}' conversation '{conversation}'"
+                );
             }
         }
 
