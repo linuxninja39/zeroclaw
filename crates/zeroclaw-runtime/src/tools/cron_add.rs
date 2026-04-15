@@ -130,6 +130,10 @@ impl Tool for CronAddTool {
                     "type": "string",
                     "description": "Optional model override for agent jobs, e.g. 'x-ai/grok-4-1-fast'"
                 },
+                "target_public_peer": {
+                    "type": "string",
+                    "description": "Optional explicit public peer/top-level agent target for agent jobs. Use 'default' to intentionally target the implicit legacy root peer."
+                },
                 "allowed_tools": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -249,6 +253,14 @@ impl Tool for CronAddTool {
             None => None,
         };
 
+        if matches!(job_type, JobType::Shell) && args.get("target_public_peer").is_some() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("target_public_peer is only supported for agent jobs".to_string()),
+            });
+        }
+
         let result = match job_type {
             JobType::Shell => {
                 let command = match args.get("command").and_then(serde_json::Value::as_str) {
@@ -313,6 +325,10 @@ impl Tool for CronAddTool {
                     .get("model")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
+                let target_public_peer = args
+                    .get("target_public_peer")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
                 let allowed_tools = match args.get("allowed_tools") {
                     Some(v) => match serde_json::from_value::<Vec<String>>(v.clone()) {
                         Ok(v) => {
@@ -347,6 +363,7 @@ impl Tool for CronAddTool {
                     delivery,
                     delete_after_run,
                     allowed_tools,
+                    target_public_peer,
                 )
             }
         };
@@ -361,7 +378,8 @@ impl Tool for CronAddTool {
                     "schedule": job.schedule,
                     "next_run": job.next_run,
                     "enabled": job.enabled,
-                    "allowed_tools": job.allowed_tools
+                    "allowed_tools": job.allowed_tools,
+                    "target_public_peer": job.target_public_peer
                 }))?,
                 error: None,
             }),
@@ -379,7 +397,7 @@ mod tests {
     use super::*;
     use crate::security::AutonomyLevel;
     use tempfile::TempDir;
-    use zeroclaw_config::schema::Config;
+    use zeroclaw_config::schema::{Config, PeerConfig};
 
     async fn test_config(tmp: &TempDir) -> Arc<Config> {
         let config = Config {
@@ -705,6 +723,61 @@ mod tests {
         assert_eq!(
             jobs[0].allowed_tools,
             Some(vec!["file_read".into(), "web_search".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_job_persists_target_public_peer() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = Config {
+            workspace_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        config.peers.insert("support".into(), PeerConfig::default());
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        let cfg = Arc::new(config);
+        let tool = CronAddTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "schedule": { "kind": "cron", "expr": "*/5 * * * *" },
+                "job_type": "agent",
+                "prompt": "check status",
+                "target_public_peer": "support"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+
+        let jobs = cron::list_jobs(&cfg).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].target_public_peer.as_deref(), Some("support"));
+    }
+
+    #[tokio::test]
+    async fn shell_job_rejects_target_public_peer() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_config(&tmp).await;
+        let tool = CronAddTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "schedule": { "kind": "cron", "expr": "*/5 * * * *" },
+                "job_type": "shell",
+                "command": "echo ok",
+                "target_public_peer": "default"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .unwrap_or_default()
+                .contains("target_public_peer is only supported for agent jobs")
         );
     }
 

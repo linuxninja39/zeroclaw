@@ -89,6 +89,10 @@ impl Tool for CronUpdateTool {
                             "type": "string",
                             "description": "Model override for agent jobs, e.g. 'x-ai/grok-4-1-fast'"
                         },
+                        "target_public_peer": {
+                            "type": "string",
+                            "description": "Optional explicit public peer/top-level agent target for agent jobs. Use 'default' to intentionally target the implicit legacy root peer."
+                        },
                         "allowed_tools": {
                             "type": "array",
                             "items": { "type": "string" },
@@ -246,7 +250,7 @@ mod tests {
     use super::*;
     use crate::security::AutonomyLevel;
     use tempfile::TempDir;
-    use zeroclaw_config::schema::Config;
+    use zeroclaw_config::schema::{Config, PeerConfig};
 
     async fn test_config(tmp: &TempDir) -> Arc<Config> {
         let config = Config {
@@ -412,6 +416,7 @@ mod tests {
             "model",
             "allowed_tools",
             "session_target",
+            "target_public_peer",
             "delete_after_run",
             "schedule",
             "delivery",
@@ -529,6 +534,7 @@ mod tests {
             None,
             false,
             Some(vec!["file_read".into()]),
+            None,
         )
         .unwrap();
         let tool = CronUpdateTool::new(cfg.clone(), test_security(&cfg));
@@ -550,6 +556,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn updates_agent_target_public_peer() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = Config {
+            workspace_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        config.peers.insert("support".into(), PeerConfig::default());
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        let cfg = Arc::new(config);
+        let job = cron::add_agent_job(
+            &cfg,
+            None,
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "check status",
+            crate::cron::SessionTarget::Isolated,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let tool = CronUpdateTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "job_id": job.id,
+                "patch": { "target_public_peer": "support" }
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            cron::get_job(&cfg, &job.id)
+                .unwrap()
+                .target_public_peer
+                .as_deref(),
+            Some("support")
+        );
+    }
+
+    #[tokio::test]
     async fn updates_agent_allowed_tools() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_config(&tmp).await;
@@ -565,6 +618,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
         )
         .unwrap();

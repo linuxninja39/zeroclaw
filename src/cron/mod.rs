@@ -42,6 +42,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             tz,
             agent,
             allowed_tools,
+            target_public_peer,
             command,
         } => {
             let schedule = Schedule::Cron {
@@ -63,6 +64,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     } else {
                         Some(allowed_tools)
                     },
+                    target_public_peer,
                 )?;
                 println!("✅ Added agent cron job {}", job.id);
                 println!("  Expr  : {}", job.expression);
@@ -71,6 +73,9 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             } else {
                 if !allowed_tools.is_empty() {
                     bail!("--allowed-tool is only supported with --agent cron jobs");
+                }
+                if target_public_peer.is_some() {
+                    bail!("--target-public-peer is only supported with --agent cron jobs");
                 }
                 let job = add_shell_job(config, None, schedule, &command)?;
                 println!("✅ Added cron job {}", job.id);
@@ -84,6 +89,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             at,
             agent,
             allowed_tools,
+            target_public_peer,
             command,
         } => {
             let at = chrono::DateTime::parse_from_rfc3339(&at)
@@ -105,6 +111,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     } else {
                         Some(allowed_tools)
                     },
+                    target_public_peer,
                 )?;
                 println!("✅ Added one-shot agent cron job {}", job.id);
                 println!("  At    : {}", job.next_run.to_rfc3339());
@@ -112,6 +119,9 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             } else {
                 if !allowed_tools.is_empty() {
                     bail!("--allowed-tool is only supported with --agent cron jobs");
+                }
+                if target_public_peer.is_some() {
+                    bail!("--target-public-peer is only supported with --agent cron jobs");
                 }
                 let job = add_shell_job(config, None, schedule, &command)?;
                 println!("✅ Added one-shot cron job {}", job.id);
@@ -124,6 +134,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             every_ms,
             agent,
             allowed_tools,
+            target_public_peer,
             command,
         } => {
             let schedule = Schedule::Every { every_ms };
@@ -142,6 +153,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     } else {
                         Some(allowed_tools)
                     },
+                    target_public_peer,
                 )?;
                 println!("✅ Added interval agent cron job {}", job.id);
                 println!("  Every(ms): {every_ms}");
@@ -150,6 +162,9 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             } else {
                 if !allowed_tools.is_empty() {
                     bail!("--allowed-tool is only supported with --agent cron jobs");
+                }
+                if target_public_peer.is_some() {
+                    bail!("--target-public-peer is only supported with --agent cron jobs");
                 }
                 let job = add_shell_job(config, None, schedule, &command)?;
                 println!("✅ Added interval cron job {}", job.id);
@@ -163,6 +178,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             delay,
             agent,
             allowed_tools,
+            target_public_peer,
             command,
         } => {
             if agent {
@@ -183,6 +199,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     } else {
                         Some(allowed_tools)
                     },
+                    target_public_peer,
                 )?;
                 println!("✅ Added one-shot agent cron job {}", job.id);
                 println!("  At    : {}", job.next_run.to_rfc3339());
@@ -190,6 +207,9 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             } else {
                 if !allowed_tools.is_empty() {
                     bail!("--allowed-tool is only supported with --agent cron jobs");
+                }
+                if target_public_peer.is_some() {
+                    bail!("--target-public-peer is only supported with --agent cron jobs");
                 }
                 let job = add_once(config, &delay, &command)?;
                 println!("✅ Added one-shot cron job {}", job.id);
@@ -205,19 +225,25 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             command,
             name,
             allowed_tools,
+            target_public_peer,
         } => {
             if expression.is_none()
                 && tz.is_none()
                 && command.is_none()
                 && name.is_none()
                 && allowed_tools.is_empty()
+                && target_public_peer.is_none()
             {
                 bail!(
-                    "At least one of --expression, --tz, --command, --name, or --allowed-tool must be provided"
+                    "At least one of --expression, --tz, --command, --name, --allowed-tool, or --target-public-peer must be provided"
                 );
             }
 
-            let existing = if expression.is_some() || tz.is_some() || !allowed_tools.is_empty() {
+            let existing = if expression.is_some()
+                || tz.is_some()
+                || !allowed_tools.is_empty()
+                || target_public_peer.is_some()
+            {
                 Some(get_job(config, &id)?)
             } else {
                 None
@@ -245,12 +271,14 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                 None
             };
 
-            if !allowed_tools.is_empty() {
+            if !allowed_tools.is_empty() || target_public_peer.is_some() {
                 let existing = existing
                     .as_ref()
-                    .expect("existing job must be loaded when updating allowed tools");
+                    .expect("existing job must be loaded when updating agent-only fields");
                 if existing.job_type != JobType::Agent {
-                    bail!("--allowed-tool is only supported for agent cron jobs");
+                    bail!(
+                        "--allowed-tool and --target-public-peer are only supported for agent cron jobs"
+                    );
                 }
             }
 
@@ -263,6 +291,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                 } else {
                     Some(allowed_tools)
                 },
+                target_public_peer,
                 ..CronJobPatch::default()
             };
 

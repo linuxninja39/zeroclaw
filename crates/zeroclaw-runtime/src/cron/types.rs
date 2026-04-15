@@ -142,6 +142,8 @@ pub struct CronJob {
     pub job_type: JobType,
     pub session_target: SessionTarget,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_public_peer: Option<String>,
     pub enabled: bool,
     pub delivery: DeliveryConfig,
     pub delete_after_run: bool,
@@ -181,6 +183,7 @@ pub struct CronJobPatch {
     pub delivery: Option<DeliveryConfig>,
     pub model: Option<String>,
     pub session_target: Option<SessionTarget>,
+    pub target_public_peer: Option<String>,
     pub delete_after_run: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
 }

@@ -351,6 +351,9 @@ Examples:
         /// Restrict agent cron jobs to the specified tool names (repeatable, agent-only)
         #[arg(long = "allowed-tool")]
         allowed_tools: Vec<String>,
+        /// Explicit public peer/top-level agent target for agent jobs. Use 'default' for the legacy root peer.
+        #[arg(long = "target-public-peer")]
+        target_public_peer: Option<String>,
         /// Command (shell) or prompt (agent) to run
         command: String,
     },
@@ -372,6 +375,9 @@ Examples:
         /// Restrict agent cron jobs to the specified tool names (repeatable, agent-only)
         #[arg(long = "allowed-tool")]
         allowed_tools: Vec<String>,
+        /// Explicit public peer/top-level agent target for agent jobs. Use 'default' for the legacy root peer.
+        #[arg(long = "target-public-peer")]
+        target_public_peer: Option<String>,
         /// Command (shell) or prompt (agent) to run
         command: String,
     },
@@ -393,6 +399,9 @@ Examples:
         /// Restrict agent cron jobs to the specified tool names (repeatable, agent-only)
         #[arg(long = "allowed-tool")]
         allowed_tools: Vec<String>,
+        /// Explicit public peer/top-level agent target for agent jobs. Use 'default' for the legacy root peer.
+        #[arg(long = "target-public-peer")]
+        target_public_peer: Option<String>,
         /// Command (shell) or prompt (agent) to run
         command: String,
     },
@@ -416,6 +425,9 @@ Examples:
         /// Restrict agent cron jobs to the specified tool names (repeatable, agent-only)
         #[arg(long = "allowed-tool")]
         allowed_tools: Vec<String>,
+        /// Explicit public peer/top-level agent target for agent jobs. Use 'default' for the legacy root peer.
+        #[arg(long = "target-public-peer")]
+        target_public_peer: Option<String>,
         /// Command (shell) or prompt (agent) to run
         command: String,
     },
@@ -452,6 +464,9 @@ Examples:
         /// Replace the agent job allowlist with the specified tool names (repeatable)
         #[arg(long = "allowed-tool")]
         allowed_tools: Vec<String>,
+        /// Set an explicit public peer/top-level agent target for agent jobs. Use 'default' for the legacy root peer.
+        #[arg(long = "target-public-peer")]
+        target_public_peer: Option<String>,
     },
     /// Pause a scheduled task
     Pause {

@@ -6328,6 +6328,10 @@ pub struct CronJobDecl {
     /// Session target: `"isolated"` (default) or `"main"`.
     #[serde(default)]
     pub session_target: Option<String>,
+    /// Optional explicit public peer / top-level agent target for agent jobs.
+    /// Use `"default"` to intentionally target the implicit legacy root peer.
+    #[serde(default)]
+    pub target_public_peer: Option<String>,
     /// Delivery configuration.
     #[serde(default)]
     pub delivery: Option<DeliveryConfigDecl>,

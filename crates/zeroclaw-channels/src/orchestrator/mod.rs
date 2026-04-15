@@ -516,134 +516,24 @@ struct PublicPeerExecutionContext {
     identity_overlay: Option<String>,
 }
 
-fn resolve_public_peer_runtime_route(
-    model_routes: &[zeroclaw_config::schema::ModelRouteConfig],
-    runtime_ref: &str,
-) -> Option<ChannelRouteSelection> {
-    let runtime_ref = runtime_ref.trim();
-    if runtime_ref.is_empty() {
-        return None;
-    }
-
-    let hint_ref = runtime_ref.strip_prefix("hint:").unwrap_or(runtime_ref);
-    model_routes
-        .iter()
-        .find(|route| {
-            route.hint.eq_ignore_ascii_case(hint_ref)
-                || route.model.eq_ignore_ascii_case(runtime_ref)
-        })
-        .map(|route| ChannelRouteSelection {
-            provider: route.provider.clone(),
-            model: route.model.clone(),
-            api_key: route.api_key.clone(),
-        })
-}
-
-fn load_public_peer_identity_overlay(
-    workspace_dir: &Path,
-    peer_id: &str,
-    identity_ref: &str,
-) -> Result<Option<String>> {
-    let identity_ref = identity_ref.trim();
-    if identity_ref.is_empty() {
-        return Ok(None);
-    }
-
-    let full_path = if Path::new(identity_ref).is_absolute() {
-        PathBuf::from(identity_ref)
-    } else {
-        workspace_dir.join(identity_ref)
-    };
-
-    let mut rendered_overlay = None;
-    let looks_like_json = full_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
-    if looks_like_json {
-        let identity_config = zeroclaw_config::schema::IdentityConfig {
-            format: "aieos".into(),
-            aieos_path: Some(identity_ref.to_string()),
-            aieos_inline: None,
-        };
-        if let Ok(Some(aieos_identity)) =
-            zeroclaw_runtime::identity::load_aieos_identity(&identity_config, workspace_dir)
-        {
-            let rendered = zeroclaw_runtime::identity::aieos_to_system_prompt(&aieos_identity);
-            if !rendered.trim().is_empty() {
-                rendered_overlay = Some(rendered);
-            }
-        }
-    }
-
-    let rendered_overlay = match rendered_overlay {
-        Some(rendered) => rendered,
-        None => {
-            let contents = std::fs::read_to_string(&full_path).with_context(|| {
-                format!(
-                    "Failed to read peer identity overlay from {}",
-                    full_path.display()
-                )
-            })?;
-            let trimmed = contents.trim();
-            if trimmed.is_empty() {
-                return Ok(None);
-            }
-            truncate_with_ellipsis(
-                trimmed,
-                zeroclaw_runtime::agent::system_prompt::BOOTSTRAP_MAX_CHARS,
-            )
-        }
-    };
-
-    Ok(Some(format!(
-        "## Peer Identity Overlay\n\nThis conversation is bound to public peer `{peer_id}`. Apply the following peer-specific identity instructions on top of the default workspace context.\n\n{rendered_overlay}"
-    )))
-}
-
 fn resolve_public_peer_execution_context(
     ctx: &ChannelRuntimeContext,
     resolved_public_peer: &zeroclaw_config::schema::ResolvedPublicPeer<'_>,
 ) -> PublicPeerExecutionContext {
-    let mut execution = PublicPeerExecutionContext {
-        peer_id: resolved_public_peer.peer_id.to_string(),
-        ..PublicPeerExecutionContext::default()
-    };
+    let execution = zeroclaw_runtime::public_peer::resolve_public_peer_execution_context(
+        ctx.prompt_config.as_ref(),
+        resolved_public_peer,
+    );
 
-    let Some(peer) = resolved_public_peer.peer else {
-        return execution;
-    };
-
-    if let Some(runtime_ref) = peer.runtime_ref.as_deref() {
-        execution.default_route =
-            resolve_public_peer_runtime_route(ctx.model_routes.as_ref(), runtime_ref);
-        if execution.default_route.is_none() {
-            tracing::warn!(
-                public_peer = resolved_public_peer.peer_id,
-                runtime_ref,
-                "Ignoring unresolved public peer runtime_ref"
-            );
-        }
+    PublicPeerExecutionContext {
+        peer_id: execution.peer_id,
+        default_route: execution.default_route.map(|route| ChannelRouteSelection {
+            provider: route.provider,
+            model: route.model,
+            api_key: route.api_key,
+        }),
+        identity_overlay: execution.identity_overlay,
     }
-
-    if let Some(identity_ref) = peer.identity_ref.as_deref() {
-        match load_public_peer_identity_overlay(
-            ctx.workspace_dir.as_ref(),
-            resolved_public_peer.peer_id,
-            identity_ref,
-        ) {
-            Ok(overlay) => execution.identity_overlay = overlay,
-            Err(err) => {
-                tracing::warn!(
-                    public_peer = resolved_public_peer.peer_id,
-                    identity_ref,
-                    "Failed to load public peer identity overlay: {err}"
-                );
-            }
-        }
-    }
-
-    execution
 }
 
 /// Returns `true` when `content` is a `/stop` command (with optional `@botname` suffix).

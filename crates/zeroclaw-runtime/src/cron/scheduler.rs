@@ -50,6 +50,7 @@ pub async fn run(config: Config, event_tx: EventBroadcast) -> Result<()> {
             model: None,
             allowed_tools: None,
             session_target: None,
+            target_public_peer: None,
             delivery: None,
         };
         tracing::debug!(
@@ -243,6 +244,74 @@ async fn execute_and_persist_job(
     (job.id.clone(), success, output)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedAgentJobRun {
+    prompt: String,
+    provider_override: Option<String>,
+    model_override: Option<String>,
+    resolved_public_peer: Option<String>,
+}
+
+fn prepare_agent_job_run(
+    config: &Config,
+    job: &CronJob,
+    name: &str,
+    prompt: &str,
+    memory_context: &str,
+) -> Result<PreparedAgentJobRun> {
+    use std::fmt::Write;
+
+    let public_peer_execution = crate::public_peer::resolve_target_public_peer_execution_context(
+        config,
+        job.target_public_peer.as_deref(),
+    )?;
+
+    let mut composed_prompt = String::new();
+    if !memory_context.is_empty() {
+        composed_prompt.push_str(memory_context);
+    }
+
+    let mut provider_override = None;
+    let mut model_override = job.model.clone();
+    let mut resolved_public_peer = None;
+    if let Some(public_peer_execution) = public_peer_execution {
+        resolved_public_peer = Some(public_peer_execution.peer_id.clone());
+
+        if model_override.is_none()
+            && let Some(route) = public_peer_execution.default_route
+        {
+            provider_override = Some(route.provider);
+            model_override = Some(route.model);
+        }
+
+        let _ = write!(
+            composed_prompt,
+            "[Public peer target]
+This scheduled run is explicitly targeting public peer `{}`.
+
+",
+            public_peer_execution.peer_id
+        );
+        if let Some(identity_overlay) = public_peer_execution.identity_overlay {
+            composed_prompt.push_str(&identity_overlay);
+            composed_prompt.push_str(
+                "
+
+",
+            );
+        }
+    }
+
+    let _ = write!(composed_prompt, "[cron:{} {name}] {prompt}", job.id);
+
+    Ok(PreparedAgentJobRun {
+        prompt: composed_prompt,
+        provider_override,
+        model_override,
+        resolved_public_peer,
+    })
+}
+
 async fn run_agent_job(
     config: &Config,
     security: &SecurityPolicy,
@@ -303,16 +372,25 @@ async fn run_agent_job(
         Err(_) => String::new(),
     };
 
-    let prefixed_prompt = format!("{memory_context}[cron:{} {name}] {prompt}", job.id);
-    let model_override = job.model.clone();
+    let prepared = match prepare_agent_job_run(config, job, &name, &prompt, &memory_context) {
+        Ok(prepared) => prepared,
+        Err(e) => return (false, format!("agent job failed: {e}")),
+    };
+    tracing::debug!(
+        job_id = %job.id,
+        target_public_peer = prepared.resolved_public_peer.as_deref(),
+        provider_override = prepared.provider_override.as_deref(),
+        model_override = prepared.model_override.as_deref(),
+        "Prepared cron agent job execution"
+    );
 
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
             Box::pin(crate::agent::run(
                 config.clone(),
-                Some(prefixed_prompt),
-                None,
-                model_override,
+                Some(prepared.prompt),
+                prepared.provider_override,
+                prepared.model_override,
                 config.default_temperature,
                 vec![],
                 false,
@@ -617,7 +695,7 @@ mod tests {
     use crate::security::SecurityPolicy;
     use chrono::{Duration as ChronoDuration, Utc};
     use tempfile::TempDir;
-    use zeroclaw_config::schema::Config;
+    use zeroclaw_config::schema::{Config, ModelRouteConfig, PeerConfig};
 
     async fn test_config(tmp: &TempDir) -> Config {
         let config = Config {
@@ -645,6 +723,7 @@ mod tests {
             job_type: JobType::Shell,
             session_target: SessionTarget::Isolated,
             model: None,
+            target_public_peer: None,
             enabled: true,
             delivery: DeliveryConfig::default(),
             delete_after_run: false,
@@ -726,6 +805,102 @@ mod tests {
             ..test_job("echo test")
         };
         assert!(!is_high_frequency_agent_job(&job));
+    }
+
+    #[tokio::test]
+    async fn prepare_agent_job_run_applies_public_peer_route_and_identity_overlay() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.model_routes.push(ModelRouteConfig {
+            hint: "support".into(),
+            provider: "anthropic".into(),
+            model: "claude-3-7-sonnet".into(),
+            api_key: None,
+        });
+        config.peers.insert(
+            "support".into(),
+            PeerConfig {
+                identity_ref: Some("peers/support.md".into()),
+                runtime_ref: Some("hint:support".into()),
+                ..PeerConfig::default()
+            },
+        );
+        tokio::fs::create_dir_all(config.workspace_dir.join("peers"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            config.workspace_dir.join("peers/support.md"),
+            "You are the support peer.",
+        )
+        .await
+        .unwrap();
+
+        let mut job = agent_job_with_schedule(crate::cron::Schedule::Cron {
+            expr: "*/5 * * * *".into(),
+            tz: None,
+        });
+        job.name = Some("support-cron".into());
+        job.prompt = Some("Handle escalations".into());
+        job.target_public_peer = Some("support".into());
+
+        let prepared = prepare_agent_job_run(
+            &config,
+            &job,
+            job.name.as_deref().unwrap(),
+            job.prompt.as_deref().unwrap(),
+            "[Memory context]
+- ticket: VIP customer
+
+",
+        )
+        .unwrap();
+
+        assert_eq!(prepared.provider_override.as_deref(), Some("anthropic"));
+        assert_eq!(
+            prepared.model_override.as_deref(),
+            Some("claude-3-7-sonnet")
+        );
+        assert_eq!(prepared.resolved_public_peer.as_deref(), Some("support"));
+        assert!(prepared.prompt.contains("public peer `support`"));
+        assert!(prepared.prompt.contains("You are the support peer."));
+        assert!(
+            prepared
+                .prompt
+                .contains("[cron:test-job support-cron] Handle escalations")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_agent_job_run_supports_explicit_default_target() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+
+        let mut job = agent_job_with_schedule(crate::cron::Schedule::Cron {
+            expr: "*/5 * * * *".into(),
+            tz: None,
+        });
+        job.name = Some("default-cron".into());
+        job.prompt = Some("Handle root tasks".into());
+        job.target_public_peer = Some("default".into());
+
+        let prepared = prepare_agent_job_run(
+            &config,
+            &job,
+            job.name.as_deref().unwrap(),
+            job.prompt.as_deref().unwrap(),
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(prepared.provider_override, None);
+        assert_eq!(prepared.model_override, None);
+        assert_eq!(prepared.resolved_public_peer.as_deref(), Some("default"));
+        assert!(prepared.prompt.contains("public peer `default`"));
+        assert!(
+            prepared
+                .prompt
+                .contains("[cron:test-job default-cron] Handle root tasks")
+        );
     }
 
     #[tokio::test]
@@ -1038,6 +1213,7 @@ mod tests {
             None,
             true,
             None,
+            None,
         )
         .unwrap();
         let started = Utc::now();
@@ -1063,6 +1239,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
         )
         .unwrap();
@@ -1133,6 +1310,7 @@ mod tests {
             }),
             false,
             None,
+            None,
         )
         .unwrap();
         let started = Utc::now();
@@ -1172,6 +1350,7 @@ mod tests {
             }),
             false,
             None,
+            None,
         )
         .unwrap();
         let started = Utc::now();
@@ -1203,6 +1382,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
         )
         .unwrap();
