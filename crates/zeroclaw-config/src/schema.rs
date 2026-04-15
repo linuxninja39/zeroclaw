@@ -11271,8 +11271,6 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{Mutex, MutexGuard};
     use tokio::test;
-    use tokio_stream::StreamExt;
-    use tokio_stream::wrappers::ReadDirStream;
 
     // ── Tilde expansion ───────────────────────────────────────
 
@@ -11810,6 +11808,8 @@ auto_save = true
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
             agents: HashMap::new(),
+            peers: HashMap::new(),
+            bindings: Vec::new(),
             swarms: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -12340,6 +12340,8 @@ default_temperature = 0.7
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
             agents: HashMap::new(),
+            peers: HashMap::new(),
+            bindings: Vec::new(),
             swarms: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -12540,10 +12542,11 @@ default_temperature = 0.7
         let contents = tokio::fs::read_to_string(&config_path).await.unwrap();
         assert!(contents.contains("model-b"));
 
-        let names: Vec<String> = ReadDirStream::new(fs::read_dir(&dir).await.unwrap())
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
-            .collect()
-            .await;
+        let mut names = Vec::new();
+        let mut entries = fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
         assert!(!names.iter().any(|name| name.contains(".tmp-")));
         assert!(!names.iter().any(|name| name.ends_with(".bak")));
 
@@ -16858,7 +16861,7 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
         let err = config
             .set_prop("autonomy.allowed-roots", "not-an-array")
             .unwrap_err();
-        assert!(err.to_string().contains("array of strings"));
+        assert!(err.to_string().contains("Invalid string-list value"));
     }
 
     #[test]

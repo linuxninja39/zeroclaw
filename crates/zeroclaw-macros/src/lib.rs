@@ -303,13 +303,6 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
                         }
                     }
                 });
-                nested_set_prop.push(quote! {
-                    if let Some(inner) = &mut self.#field_ident {
-                        if let Ok(()) = inner.set_prop(name, value_str) {
-                            return Ok(());
-                        }
-                    }
-                });
                 nested_prop_is_secret.push(quote! {
                     // Extract inner type from Option for static dispatch
                     // We need to know the inner type at compile time
@@ -318,6 +311,18 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
                 // For Option<T> nested, extract inner type for Default::default()
                 if let Some(inner_ty) = extract_option_inner(&field.ty) {
                     let inner_ty_tokens = quote! { #inner_ty };
+                    nested_set_prop.push(quote! {
+                        if let Some(inner) = &mut self.#field_ident {
+                            let child_prefix = <#inner_ty_tokens>::configurable_prefix();
+                            if name == child_prefix
+                                || name
+                                    .strip_prefix(child_prefix)
+                                    .is_some_and(|suffix| suffix.starts_with('.'))
+                            {
+                                return inner.set_prop(name, value_str);
+                            }
+                        }
+                    });
                     init_defaults_ops.push(quote! {
                         if self.#field_ident.is_none() {
                             let child_prefix = <#inner_ty_tokens>::configurable_prefix();
@@ -369,14 +374,19 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
                         return Ok(val);
                     }
                 });
-                nested_set_prop.push(quote! {
-                    if let Ok(()) = self.#field_ident.set_prop(name, value_str) {
-                        return Ok(());
-                    }
-                });
 
                 // Get the field type for static method dispatch
                 let field_ty = &field.ty;
+                nested_set_prop.push(quote! {
+                    let child_prefix = <#field_ty>::configurable_prefix();
+                    if name == child_prefix
+                        || name
+                            .strip_prefix(child_prefix)
+                            .is_some_and(|suffix| suffix.starts_with('.'))
+                    {
+                        return self.#field_ident.set_prop(name, value_str);
+                    }
+                });
                 nested_prop_is_secret.push(quote! {
                     if <#field_ty>::prop_is_secret(name) {
                         return true;
