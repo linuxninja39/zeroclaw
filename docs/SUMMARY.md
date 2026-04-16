@@ -84,6 +84,7 @@ Last refreshed: **February 18, 2026**.
 ### 2) Command/Config References & Integrations
 
 - [reference/README.md](reference/README.md)
+- [public-peers.md](reference/public-peers.md)
 - [commands-reference.md](reference/cli/commands-reference.md)
 - [providers-reference.md](reference/api/providers-reference.md)
 - [channels-reference.md](reference/api/channels-reference.md)

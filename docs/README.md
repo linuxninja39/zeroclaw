@@ -15,6 +15,7 @@ Localized hubs:
 | Bootstrap in one command | [one-click-bootstrap.md](setup-guides/one-click-bootstrap.md) |
 | Update or uninstall on macOS | [macos-update-uninstall.md](setup-guides/macos-update-uninstall.md) |
 | Find commands by task | [commands-reference.md](reference/cli/commands-reference.md) |
+| Understand and configure public peers | [public-peers.md](reference/public-peers.md) |
 | Check config defaults and keys quickly | [config-reference.md](reference/api/config-reference.md) |
 | Configure custom providers/endpoints | [custom-providers.md](contributing/custom-providers.md) |
 | Configure Z.AI / GLM provider | [zai-glm-setup.md](setup-guides/zai-glm-setup.md) |
@@ -53,6 +54,7 @@ Localized hubs:
 - [commands-reference.md](reference/cli/commands-reference.md) — command lookup by workflow
 - [providers-reference.md](reference/api/providers-reference.md) — provider IDs, aliases, credential env vars
 - [channels-reference.md](reference/api/channels-reference.md) — channel capabilities and setup paths
+- [public-peers.md](reference/public-peers.md) — bind external conversations to multiple top-level peers on one host
 - [matrix-e2ee-guide.md](security/matrix-e2ee-guide.md) — Matrix encrypted-room (E2EE) setup and no-response diagnostics
 - [config-reference.md](reference/api/config-reference.md) — high-signal config keys and secure defaults
 - [custom-providers.md](contributing/custom-providers.md) — custom provider/base URL integration templates

@@ -4,6 +4,7 @@ Structured reference index for commands, providers, channels, config, and integr
 
 ## Core References
 
+- Public peers operator guide: [public-peers.md](public-peers.md)
 - Commands by workflow: [cli/commands-reference.md](cli/commands-reference.md)
 - Provider IDs / aliases / env vars: [api/providers-reference.md](api/providers-reference.md)
 - Channel setup + allowlists: [api/channels-reference.md](api/channels-reference.md)

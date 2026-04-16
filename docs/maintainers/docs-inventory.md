@@ -45,6 +45,7 @@ Last reviewed: **February 18, 2026**.
 | Doc | Type | Audience |
 |---|---|---|
 | `docs/one-click-bootstrap.md` | Current Guide | users/operators |
+| `docs/reference/public-peers.md` | Current Guide | operators |
 | `docs/commands-reference.md` | Current Reference | users/operators |
 | `docs/providers-reference.md` | Current Reference | users/operators |
 | `docs/channels-reference.md` | Current Reference | users/operators |

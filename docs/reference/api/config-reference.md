@@ -336,7 +336,9 @@ Notes:
 - Peer ids should be lowercase and may contain digits, `_`, or `-`.
 - `identity_ref` is appended as a peer identity overlay when the peer is selected.
 - `runtime_ref` can point at a model route (for example `hint:ops-runtime`) to change provider/model defaults for that peer.
+- Only top-level peers with `public = true` are valid explicit public-peer targets. Private delegates under `[agents]` remain internal.
 - Public peers do not create an external API surface. Humans still reach them through configured channels and explicit bindings.
+- For a step-by-step operator guide, see [public-peers.md](../public-peers.md).
 
 ```toml
 [peers.ops]
@@ -364,6 +366,7 @@ Notes:
 
 - If no binding matches an inbound conversation, ZeroClaw falls back to the implicit `default` peer and preserves legacy behavior.
 - Bindings let operators split one bot across multiple human-facing conversations without exposing peers as direct API endpoints.
+- Bindings can target only `default` or a configured public peer under `[peers]`. They cannot target `[agents.<name>]` delegates or `public = false` peers.
 - Conversation ids are channel-specific. For example, a Telegram chat id and a Slack channel/thread id are different binding values.
 
 ```toml
@@ -394,6 +397,7 @@ Notes:
 - Declarative jobs in `[[cron.jobs]]` are synced into the database at scheduler startup.
 - Declarative config updates replace prior declarative versions of the same `id`, but do not delete imperative jobs created through the CLI.
 - For agent jobs, `target_public_peer` lets you run the job through a specific public peer, including its runtime and identity overlay behavior.
+- `target_public_peer` is same-host dispatch to a top-level public peer and is rejected for shell jobs.
 - Use `target_public_peer = "default"` when you want to be explicit about keeping the legacy top-level/root peer behavior.
 
 ```toml
@@ -965,6 +969,7 @@ zeroclaw service restart
 
 ## Related Docs
 
+- [public-peers.md](../public-peers.md)
 - [channels-reference.md](channels-reference.md)
 - [providers-reference.md](providers-reference.md)
 - [operations-runbook.md](../../ops/operations-runbook.md)
