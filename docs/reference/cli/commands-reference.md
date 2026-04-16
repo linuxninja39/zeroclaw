@@ -120,10 +120,19 @@ Notes:
 - `zeroclaw cron pause <id>`
 - `zeroclaw cron resume <id>`
 
+Agent-job examples:
+
+- `zeroclaw cron add '0 14 * * *' --agent --target-public-peer ops 'Summarize overnight incidents for the ops chat'`
+- `zeroclaw cron add-every 3600000 --agent --target-public-peer default 'Check root-level housekeeping tasks'`
+- `zeroclaw cron update <id> --target-public-peer support`
+
 Notes:
 
 - Mutating schedule/cron actions require `cron.enabled = true`.
 - Shell command payloads for schedule creation (`create` / `add` / `once`) are validated by security command policy before job persistence.
+- `--target-public-peer <peer>` is supported only for `--agent` jobs and applies the selected peer's runtime and identity overlay behavior during execution.
+- Use `--target-public-peer default` when you want to explicitly keep the legacy top-level/root peer behavior.
+- For declarative scheduler config, see the `[cron]`, `[peers.<id>]`, and `[[bindings]]` examples in [config-reference.md](../api/config-reference.md).
 
 ### `models`
 

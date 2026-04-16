@@ -6,6 +6,42 @@ default_provider = "ollama"
 default_model = "llama3.2"
 default_temperature = 0.7
 
+# Example public peers and explicit channel bindings.
+# Public peers stay channel-facing only, there is no separate external peer API.
+#
+# [peers.ops]
+# description = "Operations-facing assistant for the ops Telegram chat"
+# identity_ref = "peers/ops.md"
+# runtime_ref = "hint:ops-runtime"
+#
+# [[bindings]]
+# channel = "telegram"
+# conversation = "chat-ops"
+# peer = "ops"
+#
+# [cron]
+# enabled = true
+#
+# [[cron.jobs]]
+# id = "ops-daily-digest"
+# name = "Ops daily digest"
+# job_type = "agent"
+# prompt = "Summarize overnight incidents and post a concise handoff."
+# target_public_peer = "ops"
+# allowed_tools = ["memory_search", "memory_get"]
+# session_target = "isolated"
+#
+# [cron.jobs.schedule]
+# kind = "cron"
+# expr = "0 14 * * *"
+# tz = "America/Denver"
+#
+# [cron.jobs.delivery]
+# mode = "announce"
+# channel = "telegram"
+# to = "chat-ops"
+# best_effort = true
+
 [gateway]
 port = 42617
 host = "[::]"

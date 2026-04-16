@@ -7051,6 +7051,46 @@ BTC is currently around $65,000 based on latest tool output."#
         }
     }
 
+    #[derive(Default)]
+    struct RoutedHistoryCaptureProvider {
+        call_count: AtomicUsize,
+        models: std::sync::Mutex<Vec<String>>,
+        calls: std::sync::Mutex<Vec<Vec<(String, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RoutedHistoryCaptureProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            Ok("fallback".to_string())
+        }
+
+        async fn chat_with_history(
+            &self,
+            messages: &[ChatMessage],
+            model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(model.to_string());
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(
+                messages
+                    .iter()
+                    .map(|message| (message.role.clone(), message.content.clone()))
+                    .collect(),
+            );
+            Ok("ok".to_string())
+        }
+    }
+
     #[async_trait::async_trait]
     impl Tool for MockPriceTool {
         fn name(&self) -> &str {
@@ -8187,6 +8227,225 @@ BTC is currently around $65,000 based on latest tool output."#
                 .1
                 .contains("You are the ops peer. Reply with an operational tone."),
             "bound peer should inject the referenced identity overlay content"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_channel_message_bound_peer_routes_runtime_and_identity_end_to_end() {
+        let workspace = make_workspace();
+        std::fs::write(
+            workspace.path().join("peer-ops.md"),
+            "# Ops peer\nYou are the ops peer. Reply with an operational tone.",
+        )
+        .unwrap();
+
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let default_provider_impl = Arc::new(RoutedHistoryCaptureProvider::default());
+        let default_provider: Arc<dyn Provider> = default_provider_impl.clone();
+        let peer_provider_impl = Arc::new(RoutedHistoryCaptureProvider::default());
+        let peer_provider: Arc<dyn Provider> = peer_provider_impl.clone();
+
+        let mut provider_cache_seed: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        provider_cache_seed.insert("test-provider".to_string(), Arc::clone(&default_provider));
+        provider_cache_seed.insert("openrouter".to_string(), peer_provider);
+
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.workspace_dir = workspace.path().to_path_buf();
+        config
+            .model_routes
+            .push(zeroclaw_config::schema::ModelRouteConfig {
+                hint: "ops-runtime".to_string(),
+                provider: "openrouter".to_string(),
+                model: "peer-model".to_string(),
+                api_key: None,
+            });
+        config.peers.insert(
+            "ops".into(),
+            zeroclaw_config::schema::PeerConfig {
+                identity_ref: Some("peer-ops.md".into()),
+                runtime_ref: Some("hint:ops-runtime".into()),
+                ..zeroclaw_config::schema::PeerConfig::default()
+            },
+        );
+        config
+            .bindings
+            .push(zeroclaw_config::schema::PeerBindingConfig {
+                channel: "telegram".into(),
+                conversation: "chat-ops".into(),
+                peer: "ops".into(),
+            });
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: Arc::clone(&default_provider),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("default-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+            ))),
+            pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+            provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(config.workspace_dir.clone()),
+            prompt_config: Arc::new(config.clone()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+                discord: false,
+                mattermost: false,
+                matrix: false,
+            },
+            multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+            media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+            transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            autonomy_level: AutonomyLevel::default(),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(config.model_routes.clone()),
+            query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: None,
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &zeroclaw_config::schema::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+            cost_tracking: None,
+            pacing: zeroclaw_config::schema::PacingConfig::default(),
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+                Duration::ZERO,
+            )),
+        });
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-default-combined".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-default".to_string(),
+                content: "hello default peer".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        process_channel_message(
+            runtime_ctx.clone(),
+            zeroclaw_api::channel::ChannelMessage {
+                id: "msg-bound-combined".to_string(),
+                sender: "alice".to_string(),
+                reply_target: "chat-ops".to_string(),
+                content: "hello ops peer".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 2,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+                conversation: None,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(default_provider_impl.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(peer_provider_impl.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            default_provider_impl
+                .models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &["default-model".to_string()]
+        );
+        assert_eq!(
+            peer_provider_impl
+                .models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &["peer-model".to_string()]
+        );
+
+        let default_calls = default_provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let peer_calls = peer_provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(default_calls.len(), 1);
+        assert_eq!(peer_calls.len(), 1);
+        assert!(
+            !default_calls[0][0].1.contains("## Peer Identity Overlay"),
+            "implicit default peer should keep the legacy system prompt"
+        );
+        assert!(
+            peer_calls[0][0].1.contains("## Peer Identity Overlay"),
+            "bound peer should add an identity overlay section"
+        );
+        assert!(
+            peer_calls[0][0]
+                .1
+                .contains("You are the ops peer. Reply with an operational tone."),
+            "bound peer should inject the referenced identity overlay content"
+        );
+
+        let histories = runtime_ctx
+            .conversation_histories
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(histories.peek("telegram_chat-default_alice").is_some());
+        assert!(
+            histories
+                .peek("peer:ops::telegram_chat-ops_alice")
+                .is_some()
+        );
+        assert!(
+            histories.peek("telegram_chat-ops_alice").is_none(),
+            "bound peer conversations should not reuse the legacy default history key"
+        );
+        drop(histories);
+
+        let sent_messages = channel_impl.sent_messages.lock().await;
+        assert!(
+            sent_messages
+                .iter()
+                .any(|message| message.starts_with("chat-default:")),
+            "default conversation should still receive a reply"
+        );
+        assert!(
+            sent_messages
+                .iter()
+                .any(|message| message.starts_with("chat-ops:")),
+            "bound public peer conversation should receive a reply"
         );
     }
 

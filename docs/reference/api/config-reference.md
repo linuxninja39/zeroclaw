@@ -319,6 +319,109 @@ provider = "anthropic:sherpas"
 model = "claude-sonnet-4-20250514"
 ```
 
+## `[peers.<id>]`
+
+Optional named public peers layered on top of the implicit legacy root peer.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `public` | `true` | Whether the peer is externally routable/listable |
+| `description` | unset | Operator-facing label or summary |
+| `identity_ref` | unset | Persona/identity overlay reference (workspace-relative file, key, or profile id) |
+| `runtime_ref` | unset | Runtime/profile reference used when instantiating the peer |
+
+Notes:
+
+- ZeroClaw always preserves the implicit legacy root peer as `default`, even if you never define `[peers]`.
+- Peer ids should be lowercase and may contain digits, `_`, or `-`.
+- `identity_ref` is appended as a peer identity overlay when the peer is selected.
+- `runtime_ref` can point at a model route (for example `hint:ops-runtime`) to change provider/model defaults for that peer.
+- Public peers do not create an external API surface. Humans still reach them through configured channels and explicit bindings.
+
+```toml
+[peers.ops]
+public = true
+description = "Operations-facing assistant for the ops Telegram chat"
+identity_ref = "peers/ops.md"
+runtime_ref = "hint:ops-runtime"
+
+[peers.support]
+description = "Customer support peer used for escalations"
+identity_ref = "peers/support.md"
+```
+
+## `[[bindings]]`
+
+Optional explicit bindings from an external channel conversation to a public peer.
+
+| Key | Type | Purpose |
+|---|---|---|
+| `channel` | `string` | Channel / transport name (for example `telegram`, `discord`, `slack`) |
+| `conversation` | `string` | Canonical external conversation identifier within that channel |
+| `peer` | `string` | Target public peer id, or `default` for the implicit legacy root peer |
+
+Notes:
+
+- If no binding matches an inbound conversation, ZeroClaw falls back to the implicit `default` peer and preserves legacy behavior.
+- Bindings let operators split one bot across multiple human-facing conversations without exposing peers as direct API endpoints.
+- Conversation ids are channel-specific. For example, a Telegram chat id and a Slack channel/thread id are different binding values.
+
+```toml
+[[bindings]]
+channel = "telegram"
+conversation = "chat-ops"
+peer = "ops"
+
+[[bindings]]
+channel = "discord"
+conversation = "123456789012345678"
+peer = "support"
+```
+
+## `[cron]`
+
+Built-in scheduler configuration and optional declarative jobs.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | Enable scheduler mutating commands and execution |
+| `catch_up_on_startup` | `true` | Run missed eligible jobs after startup |
+| `max_run_history` | `50` | Number of run records retained per job |
+| `jobs` | `[]` | Declarative cron jobs synced into the scheduler database |
+
+Notes:
+
+- Declarative jobs in `[[cron.jobs]]` are synced into the database at scheduler startup.
+- Declarative config updates replace prior declarative versions of the same `id`, but do not delete imperative jobs created through the CLI.
+- For agent jobs, `target_public_peer` lets you run the job through a specific public peer, including its runtime and identity overlay behavior.
+- Use `target_public_peer = "default"` when you want to be explicit about keeping the legacy top-level/root peer behavior.
+
+```toml
+[cron]
+enabled = true
+catch_up_on_startup = true
+
+[[cron.jobs]]
+id = "ops-daily-digest"
+name = "Ops daily digest"
+job_type = "agent"
+prompt = "Summarize overnight incidents and post a concise handoff."
+target_public_peer = "ops"
+allowed_tools = ["memory_search", "memory_get"]
+session_target = "isolated"
+
+[cron.jobs.schedule]
+kind = "cron"
+expr = "0 14 * * *"
+tz = "America/Denver"
+
+[cron.jobs.delivery]
+mode = "announce"
+channel = "telegram"
+to = "chat-ops"
+best_effort = true
+```
+
 ## `[runtime]`
 
 | Key | Default | Purpose |
