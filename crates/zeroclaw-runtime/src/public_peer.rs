@@ -116,7 +116,7 @@ pub fn resolve_public_peer_execution_context(
 
     if let Some(runtime_ref) = peer.runtime_ref.as_deref() {
         execution.default_route =
-            resolve_public_peer_runtime_route(&config.model_routes, runtime_ref);
+            resolve_public_peer_runtime_route(&config.providers.model_routes, runtime_ref);
         if execution.default_route.is_none() {
             tracing::warn!(
                 public_peer = resolved_public_peer.peer_id,

@@ -411,9 +411,11 @@ pub fn derive_configurable(input: TokenStream) -> TokenStream {
         let is_option = is_option_type(&field.ty);
         let inner_ty = extract_option_inner(&field.ty).unwrap_or(&field.ty);
 
-        // Skip unsupported compound types. `Vec<String>` is allowed and
-        // exposed as a string-list property.
-        if is_compound_type(inner_ty) {
+        // Skip compound types (Vec, HashMap, PathBuf), but expose Vec<String> as StringList.
+        let is_vec_string = extract_vec_inner(inner_ty)
+            .map(|t| t.to_token_stream().to_string() == "String")
+            .unwrap_or(false);
+        if is_compound_type(inner_ty) && !is_vec_string {
             continue;
         }
 

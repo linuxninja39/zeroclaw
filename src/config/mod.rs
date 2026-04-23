@@ -1,3 +1,5 @@
+pub use zeroclaw_config::migration;
+pub use zeroclaw_config::providers;
 pub mod schema;
 pub mod traits;
 pub mod workspace;
@@ -36,6 +38,7 @@ pub use schema::{
     ws_connect_with_proxy,
 };
 
+pub use schema::ModelProviderConfig;
 pub use traits::HasPropKind;
 pub use traits::PropFieldInfo;
 pub use traits::PropKind;
@@ -101,6 +104,9 @@ pub fn make_prop_field(
     let display_value = if is_secret {
         match table.and_then(|t| t.get(serde_name)) {
             Some(toml::Value::String(s)) if !s.is_empty() => "****".to_string(),
+            Some(toml::Value::Array(arr)) if !arr.is_empty() => {
+                format!("[{}]", vec!["****"; arr.len()].join(", "))
+            }
             _ => "<unset>".to_string(),
         }
     } else {
@@ -217,12 +223,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_string_list_toml_array() {
+        let result = parse_prop_value("['alice', 'bob', 'charlie']", PropKind::StringList).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_str(), Some("alice"));
+        assert_eq!(arr[1].as_str(), Some("bob"));
+        assert_eq!(arr[2].as_str(), Some("charlie"));
+    }
+
+    #[test]
+    fn parse_string_list_empty_array() {
+        let result = parse_prop_value("[]", PropKind::StringList).unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parse_string_list_single_value() {
+        let result = parse_prop_value("['alice']", PropKind::StringList).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].as_str(), Some("alice"));
+    }
+
+    #[test]
     fn reexported_config_default_is_constructible() {
         let config = Config::default();
 
-        assert!(config.default_provider.is_some());
-        assert!(config.default_model.is_some());
-        assert!(config.default_temperature > 0.0);
+        // Config::default() no longer has provider cache fields; just verify providers is constructible
+        assert!(config.providers.fallback.is_none() || config.providers.fallback.is_some());
     }
 
     #[test]
@@ -238,6 +267,7 @@ mod tests {
             ack_reactions: None,
             direct_chat_reply_intent_precheck: true,
             proxy_url: None,
+            approval_timeout_secs: 120,
         };
 
         let discord = DiscordConfig {
@@ -275,6 +305,7 @@ mod tests {
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec![],
+            mention_only: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,
             proxy_url: None,

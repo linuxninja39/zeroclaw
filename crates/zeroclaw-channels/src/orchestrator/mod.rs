@@ -11,16 +11,14 @@
 //!
 //! # Extension
 //!
-//! To add a new channel, implement [`Channel`] in a new submodule and wire it into
-//! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
+//! To add a new channel, implement [`Channel`] in a new top-level module in
+//! `zeroclaw-channels/src/`, declare it in `lib.rs` behind the appropriate feature
+//! gate, and wire it into [`start_channels`] here. See `AGENTS.md` §7.2 for the
+//! full change playbook.
 
 pub mod acp_server;
-#[cfg(feature = "channel-matrix")]
-pub mod matrix;
 pub mod media_pipeline;
 pub mod mqtt;
-#[cfg(feature = "channel-telegram")]
-pub mod telegram;
 
 // Channel types imported directly from source crates (no shim files)
 pub use crate::bluesky::BlueskyChannel;
@@ -36,6 +34,8 @@ pub use crate::imessage::IMessageChannel;
 pub use crate::irc::IrcChannel;
 #[cfg(feature = "channel-lark")]
 pub use crate::lark::LarkChannel;
+#[cfg(feature = "channel-line")]
+pub use crate::line::LineChannel;
 pub use crate::linq::LinqChannel;
 pub use crate::mattermost::MattermostChannel;
 pub use crate::mochat::MochatChannel;
@@ -50,6 +50,7 @@ pub use crate::slack::SlackChannel;
 pub use crate::transcription;
 pub use crate::tts::{TtsManager, TtsProvider};
 pub use crate::twitter::TwitterChannel;
+#[cfg(feature = "channel-voice-call")]
 pub use crate::voice_call::VoiceCallChannel;
 #[cfg(feature = "voice-wake")]
 pub use crate::voice_wake::VoiceWakeChannel;
@@ -61,12 +62,12 @@ pub use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 // Local channel types (in misc, not zeroclaw-channels)
 pub use crate::cli::CliChannel;
 pub use crate::link_enricher;
+#[cfg(feature = "channel-matrix")]
+pub use crate::matrix::MatrixChannel;
+#[cfg(feature = "channel-telegram")]
+pub use crate::telegram::TelegramChannel;
 #[cfg(feature = "whatsapp-web")]
 pub use crate::whatsapp_web::WhatsAppWebChannel;
-#[cfg(feature = "channel-matrix")]
-pub use matrix::MatrixChannel;
-#[cfg(feature = "channel-telegram")]
-pub use telegram::TelegramChannel;
 pub use zeroclaw_infra::debounce::MessageDebouncer;
 pub use zeroclaw_infra::session_backend::SessionBackend;
 pub use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
@@ -554,7 +555,7 @@ fn is_stop_command(content: &str) -> bool {
 /// `<tool_call>`, `<toolcall>`, `<tool-call>`, `<tool>`, or `<invoke>`
 /// blocks that are internal protocol and must not be forwarded to end
 /// users on any channel.
-fn strip_tool_call_tags(message: &str) -> String {
+pub(crate) fn strip_tool_call_tags(message: &str) -> String {
     const TOOL_CALL_OPEN_TAGS: [&str; 7] = [
         "<function_calls>",
         "<function_call>",
@@ -670,6 +671,9 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
             "When responding on Matrix:\n\
              - Use Markdown formatting (bold, italic, code blocks)\n\
              - Be concise and direct\n\
+             - For media attachments use markers: [IMAGE:<absolute-path>], [DOCUMENT:<absolute-path>], [VIDEO:<absolute-path>], [AUDIO:<absolute-path>], or [VOICE:<absolute-path>]\n\
+             - Paths inside markers MUST be absolute (starting with /). Never use relative paths.\n\
+             - Keep normal text outside markers and never wrap markers in code fences.\n\
              - When you receive a [Voice message], the user spoke to you. Respond naturally as in conversation.\n\
              - Your text reply will automatically be converted to audio and sent back as a voice message.\n",
         ),
@@ -899,15 +903,17 @@ fn resolve_provider_alias(name: &str) -> Option<String> {
 
 fn resolved_default_provider(config: &Config) -> String {
     config
-        .default_provider
+        .providers
+        .fallback
         .clone()
         .unwrap_or_else(|| "openrouter".to_string())
 }
 
 fn resolved_default_model(config: &Config) -> String {
     config
-        .default_model
-        .clone()
+        .providers
+        .fallback_provider()
+        .and_then(|e| e.model.clone())
         .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string())
 }
 
@@ -915,9 +921,19 @@ fn runtime_defaults_from_config(config: &Config) -> ChannelRuntimeDefaults {
     ChannelRuntimeDefaults {
         default_provider: resolved_default_provider(config),
         model: resolved_default_model(config),
-        temperature: config.default_temperature,
-        api_key: config.api_key.clone(),
-        api_url: config.api_url.clone(),
+        temperature: config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.temperature)
+            .unwrap_or(0.7),
+        api_key: config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.api_key.clone()),
+        api_url: config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.base_url.clone()),
         reliability: config.reliability.clone(),
     }
 }
@@ -986,7 +1002,13 @@ async fn load_runtime_defaults_from_config_file(path: &Path) -> Result<ChannelRu
     if let Some(zeroclaw_dir) = path.parent() {
         let store =
             zeroclaw_runtime::security::SecretStore::new(zeroclaw_dir, parsed.secrets.encrypt);
-        decrypt_optional_secret_for_runtime_reload(&store, &mut parsed.api_key, "config.api_key")?;
+        if let Some(fallback_entry) = parsed.providers.fallback_provider_mut() {
+            decrypt_optional_secret_for_runtime_reload(
+                &store,
+                &mut fallback_entry.api_key,
+                "config.providers.fallback.api_key",
+            )?;
+        }
         // Decrypt TTS provider API keys for runtime reload
         if let Some(ref mut openai) = parsed.tts.openai {
             decrypt_optional_secret_for_runtime_reload(
@@ -1441,6 +1463,13 @@ fn should_rollback_failed_user_turn(error: &anyhow::Error) -> bool {
 
 fn should_skip_memory_context_entry(key: &str, content: &str) -> bool {
     if zeroclaw_memory::is_assistant_autosave_key(key) {
+        return true;
+    }
+
+    // Skip raw per-turn user messages: re-injecting them causes each
+    // recalled entry to embed all prior generations, growing exponentially.
+    // Consolidated knowledge is already promoted to Core/Daily entries.
+    if zeroclaw_memory::is_user_autosave_key(key) {
         return true;
     }
 
@@ -2146,7 +2175,7 @@ fn should_skip_reply_intent_precheck(ctx: &ChannelRuntimeContext, msg: &ChannelM
         && is_direct_telegram_chat(&msg.reply_target)
         && !ctx
             .prompt_config
-            .channels_config
+            .channels
             .telegram
             .as_ref()
             .map(|tg| tg.direct_chat_reply_intent_precheck)
@@ -3092,14 +3121,11 @@ async fn process_public_peer_dispatch(
             let reply_target = msg.reply_target.clone();
             let draft_id = draft_id_ref.to_string();
             Some(tokio::spawn(async move {
-                use zeroclaw_runtime::agent::loop_::DraftEvent;
+                use zeroclaw_runtime::agent::loop_::StreamDelta;
                 let mut accumulated = String::new();
                 while let Some(event) = rx.recv().await {
                     match event {
-                        DraftEvent::Clear => {
-                            accumulated.clear();
-                        }
-                        DraftEvent::Progress(text) => {
+                        StreamDelta::Status(text) => {
                             let visible = strip_think_tags_inline(&text);
                             if let Err(e) = channel
                                 .update_draft_progress(&reply_target, &draft_id, &visible)
@@ -3108,7 +3134,7 @@ async fn process_public_peer_dispatch(
                                 tracing::debug!("Draft progress update failed: {e}");
                             }
                         }
-                        DraftEvent::Content(text) => {
+                        StreamDelta::Text(text) => {
                             accumulated.push_str(&text);
                             let visible = strip_think_tags_inline(&accumulated);
                             if let Err(e) = channel
@@ -3256,6 +3282,9 @@ async fn process_public_peer_dispatch(
                         ctx.max_tool_result_chars,
                         ctx.context_token_budget,
                         None, // shared_budget
+                        target_channel.as_deref(),
+                        None, // receipt_generator
+                        None, // collected_receipts
                     ),
                     ),
                     ),
@@ -3988,7 +4017,7 @@ pub async fn bind_telegram_identity(config: &Config, identity: &str) -> Result<(
     }
 
     let mut updated = config.clone();
-    let Some(telegram) = updated.channels_config.telegram.as_mut() else {
+    let Some(telegram) = updated.channels.telegram.as_mut() else {
         anyhow::bail!(
             "Telegram channel is not configured. Run `zeroclaw onboard --channels-only` first"
         );
@@ -4133,13 +4162,11 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         #[cfg(feature = "channel-telegram")]
         "telegram" => {
             let tg = config
-                .channels_config
+                .channels
                 .telegram
                 .as_ref()
                 .context("Telegram channel is not configured")?;
-            let ack = tg
-                .ack_reactions
-                .unwrap_or(config.channels_config.ack_reactions);
+            let ack = tg.ack_reactions.unwrap_or(config.channels.ack_reactions);
             Ok(Arc::new(
                 TelegramChannel::new(
                     tg.bot_token.clone(),
@@ -4150,12 +4177,13 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                 .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
                 .with_transcription(config.transcription.clone())
                 .with_tts(config.tts.clone())
-                .with_workspace_dir(config.workspace_dir.clone()),
+                .with_workspace_dir(config.workspace_dir.clone())
+                .with_approval_timeout_secs(tg.approval_timeout_secs),
             ))
         }
         "discord" => {
             let dc = config
-                .channels_config
+                .channels
                 .discord
                 .as_ref()
                 .context("Discord channel is not configured")?;
@@ -4178,7 +4206,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "slack" => {
             let sl = config
-                .channels_config
+                .channels
                 .slack
                 .as_ref()
                 .context("Slack channel is not configured")?;
@@ -4186,7 +4214,6 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                 SlackChannel::new(
                     sl.bot_token.clone(),
                     sl.app_token.clone(),
-                    sl.channel_id.clone(),
                     sl.channel_ids.clone(),
                     sl.allowed_users.clone(),
                 )
@@ -4199,7 +4226,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "mattermost" => {
             let mm = config
-                .channels_config
+                .channels
                 .mattermost
                 .as_ref()
                 .context("Mattermost channel is not configured")?;
@@ -4214,7 +4241,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "signal" => {
             let sg = config
-                .channels_config
+                .channels
                 .signal
                 .as_ref()
                 .context("Signal channel is not configured")?;
@@ -4231,15 +4258,17 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
             #[cfg(feature = "channel-matrix")]
             {
                 let mx = config
-                    .channels_config
+                    .channels
                     .matrix
                     .as_ref()
                     .context("Matrix channel is not configured")?;
                 Ok(Arc::new(MatrixChannel::new(
                     mx.homeserver.clone(),
                     mx.access_token.clone(),
-                    mx.room_id.clone(),
+                    // "" sentinel = no specific room (join logic handles "allow all")
+                    mx.allowed_rooms.first().cloned().unwrap_or_default(),
                     mx.allowed_users.clone(),
+                    mx.mention_only,
                 )))
             }
             #[cfg(not(feature = "channel-matrix"))]
@@ -4251,7 +4280,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
             #[cfg(feature = "whatsapp-web")]
             {
                 let wa = config
-                    .channels_config
+                    .channels
                     .whatsapp
                     .as_ref()
                     .context("WhatsApp channel is not configured")?;
@@ -4279,7 +4308,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "qq" => {
             let qq = config
-                .channels_config
+                .channels
                 .qq
                 .as_ref()
                 .context("QQ channel is not configured")?;
@@ -4293,7 +4322,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
             #[cfg(feature = "channel-lark")]
             {
                 let lk = config
-                    .channels_config
+                    .channels
                     .lark
                     .as_ref()
                     .context("Lark channel is not configured")?;
@@ -4307,12 +4336,12 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         "feishu" => {
             #[cfg(feature = "channel-lark")]
             {
-                if let Some(ref fs) = config.channels_config.feishu {
+                if let Some(ref fs) = config.channels.feishu {
                     return Ok(Arc::new(LarkChannel::from_feishu_config(fs)));
                 }
                 // Legacy: [channels_config.lark] with use_feishu = true
                 let lk = config
-                    .channels_config
+                    .channels
                     .lark
                     .as_ref()
                     .context("Feishu channel is not configured")?;
@@ -4325,7 +4354,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "dingtalk" => {
             let dt = config
-                .channels_config
+                .channels
                 .dingtalk
                 .as_ref()
                 .context("DingTalk channel is not configured")?;
@@ -4340,7 +4369,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "wecom" => {
             let wc = config
-                .channels_config
+                .channels
                 .wecom
                 .as_ref()
                 .context("WeCom channel is not configured")?;
@@ -4351,7 +4380,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "nextcloud_talk" | "nextcloud-talk" => {
             let nc = config
-                .channels_config
+                .channels
                 .nextcloud_talk
                 .as_ref()
                 .context("Nextcloud Talk channel is not configured")?;
@@ -4365,7 +4394,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "wati" => {
             let wati_cfg = config
-                .channels_config
+                .channels
                 .wati
                 .as_ref()
                 .context("WATI channel is not configured")?;
@@ -4379,7 +4408,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "linq" => {
             let lq = config
-                .channels_config
+                .channels
                 .linq
                 .as_ref()
                 .context("Linq channel is not configured")?;
@@ -4392,7 +4421,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         #[cfg(feature = "channel-email")]
         "email" => {
             let em = config
-                .channels_config
+                .channels
                 .email
                 .as_ref()
                 .context("Email channel is not configured")?;
@@ -4401,7 +4430,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         #[cfg(feature = "channel-email")]
         "gmail_push" | "gmail-push" => {
             let gp = config
-                .channels_config
+                .channels
                 .gmail_push
                 .as_ref()
                 .context("Gmail Push channel is not configured")?;
@@ -4409,7 +4438,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "irc" => {
             let irc_cfg = config
-                .channels_config
+                .channels
                 .irc
                 .as_ref()
                 .context("IRC channel is not configured")?;
@@ -4428,7 +4457,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "twitter" => {
             let tw = config
-                .channels_config
+                .channels
                 .twitter
                 .as_ref()
                 .context("X/Twitter channel is not configured")?;
@@ -4439,7 +4468,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "mochat" => {
             let mc = config
-                .channels_config
+                .channels
                 .mochat
                 .as_ref()
                 .context("Mochat channel is not configured")?;
@@ -4452,7 +4481,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "discord_history" | "discord-history" => {
             let dh = config
-                .channels_config
+                .channels
                 .discord_history
                 .as_ref()
                 .context("Discord History channel is not configured")?;
@@ -4471,16 +4500,46 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
         }
         "imessage" => {
             let im = config
-                .channels_config
+                .channels
                 .imessage
                 .as_ref()
                 .context("iMessage channel is not configured")?;
             Ok(Arc::new(IMessageChannel::new(im.allowed_contacts.clone())))
         }
+        "line" => {
+            #[cfg(feature = "channel-line")]
+            {
+                let ln = config
+                    .channels
+                    .line
+                    .as_ref()
+                    .context("LINE channel is not configured")?;
+                Ok(Arc::new(LineChannel::from_config(ln)))
+            }
+            #[cfg(not(feature = "channel-line"))]
+            {
+                anyhow::bail!("LINE channel requires the `channel-line` feature");
+            }
+        }
+        "voice-call" => {
+            #[cfg(feature = "channel-voice-call")]
+            {
+                let vc = config
+                    .channels
+                    .voice_call
+                    .as_ref()
+                    .context("Voice Call channel is not configured")?;
+                Ok(Arc::new(VoiceCallChannel::new(vc.clone())))
+            }
+            #[cfg(not(feature = "channel-voice-call"))]
+            {
+                anyhow::bail!("Voice Call channel requires the `channel-voice-call` feature");
+            }
+        }
         other => anyhow::bail!(
             "Unknown channel '{other}'. Supported: telegram, discord, slack, mattermost, signal, \
             matrix, whatsapp, qq, lark, feishu, dingtalk, wecom, nextcloud_talk, wati, linq, \
-            email, gmail_push, irc, twitter, mochat, discord_history, imessage"
+            email, gmail_push, irc, twitter, mochat, discord_history, imessage, line, voice-call"
         ),
     }
 }
@@ -4532,11 +4591,9 @@ fn collect_configured_channels(
     let mut channels = Vec::new();
 
     #[cfg(feature = "channel-telegram")]
-    if let Some(ref tg) = config.channels_config.telegram {
+    if let Some(ref tg) = config.channels.telegram {
         if tg.enabled {
-            let ack = tg
-                .ack_reactions
-                .unwrap_or(config.channels_config.ack_reactions);
+            let ack = tg.ack_reactions.unwrap_or(config.channels.ack_reactions);
             channels.push(ConfiguredChannel {
                 display_name: "Telegram",
                 channel: Arc::new(
@@ -4550,7 +4607,8 @@ fn collect_configured_channels(
                     .with_transcription(config.transcription.clone())
                     .with_tts(config.tts.clone())
                     .with_workspace_dir(config.workspace_dir.clone())
-                    .with_proxy_url(tg.proxy_url.clone()),
+                    .with_proxy_url(tg.proxy_url.clone())
+                    .with_approval_timeout_secs(tg.approval_timeout_secs),
                 ),
             });
         } else {
@@ -4558,7 +4616,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref dc) = config.channels_config.discord {
+    if let Some(ref dc) = config.channels.discord {
         if dc.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Discord",
@@ -4585,7 +4643,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref dh) = config.channels_config.discord_history {
+    if let Some(ref dh) = config.channels.discord_history {
         if dh.enabled {
             match zeroclaw_memory::SqliteMemory::new_named(&config.workspace_dir, "discord") {
                 Ok(discord_mem) => {
@@ -4614,7 +4672,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref sl) = config.channels_config.slack {
+    if let Some(ref sl) = config.channels.slack {
         if sl.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Slack",
@@ -4622,7 +4680,6 @@ fn collect_configured_channels(
                     SlackChannel::new(
                         sl.bot_token.clone(),
                         sl.app_token.clone(),
-                        sl.channel_id.clone(),
                         sl.channel_ids.clone(),
                         sl.allowed_users.clone(),
                     )
@@ -4641,7 +4698,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref mm) = config.channels_config.mattermost {
+    if let Some(ref mm) = config.channels.mattermost {
         if mm.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Mattermost",
@@ -4663,7 +4720,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref im) = config.channels_config.imessage {
+    if let Some(ref im) = config.channels.imessage {
         if im.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "iMessage",
@@ -4675,7 +4732,7 @@ fn collect_configured_channels(
     }
 
     #[cfg(feature = "channel-matrix")]
-    if let Some(ref mx) = config.channels_config.matrix {
+    if let Some(ref mx) = config.channels.matrix {
         if mx.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Matrix",
@@ -4683,13 +4740,15 @@ fn collect_configured_channels(
                     MatrixChannel::new_full(
                         mx.homeserver.clone(),
                         mx.access_token.clone(),
-                        mx.room_id.clone(),
+                        // "" sentinel = no specific room (join logic handles "allow all")
+                        mx.allowed_rooms.first().cloned().unwrap_or_default(),
                         mx.allowed_users.clone(),
                         mx.allowed_rooms.clone(),
                         mx.user_id.clone(),
                         mx.device_id.clone(),
                         config.config_path.parent().map(|path| path.to_path_buf()),
                         mx.recovery_key.clone(),
+                        mx.mention_only,
                     )
                     .with_streaming(
                         mx.stream_mode,
@@ -4705,14 +4764,14 @@ fn collect_configured_channels(
     }
 
     #[cfg(not(feature = "channel-matrix"))]
-    if config.channels_config.matrix.is_some() {
+    if config.channels.matrix.is_some() {
         tracing::warn!(
             "Matrix channel is configured but this build was compiled without `channel-matrix`; skipping Matrix {}.",
             matrix_skip_context
         );
     }
 
-    if let Some(ref sig) = config.channels_config.signal {
+    if let Some(ref sig) = config.channels.signal {
         if sig.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Signal",
@@ -4733,7 +4792,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref wa) = config.channels_config.whatsapp {
+    if let Some(ref wa) = config.channels.whatsapp {
         if wa.enabled {
             if wa.is_ambiguous_config() {
                 tracing::warn!(
@@ -4814,7 +4873,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref lq) = config.channels_config.linq {
+    if let Some(ref lq) = config.channels.linq {
         if lq.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Linq",
@@ -4829,7 +4888,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref wati_cfg) = config.channels_config.wati {
+    if let Some(ref wati_cfg) = config.channels.wati {
         if wati_cfg.enabled {
             let wati_channel = WatiChannel::new_with_proxy(
                 wati_cfg.api_token.clone(),
@@ -4849,7 +4908,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref nc) = config.channels_config.nextcloud_talk {
+    if let Some(ref nc) = config.channels.nextcloud_talk {
         if nc.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Nextcloud Talk",
@@ -4867,15 +4926,19 @@ fn collect_configured_channels(
     }
 
     #[cfg(feature = "channel-email")]
-    if let Some(ref email_cfg) = config.channels_config.email {
-        channels.push(ConfiguredChannel {
-            display_name: "Email",
-            channel: Arc::new(EmailChannel::new(email_cfg.clone())),
-        });
+    if let Some(ref email_cfg) = config.channels.email {
+        if email_cfg.enabled {
+            channels.push(ConfiguredChannel {
+                display_name: "Email",
+                channel: Arc::new(EmailChannel::new(email_cfg.clone())),
+            });
+        } else {
+            tracing::info!("Email channel configured but disabled (enabled = false)");
+        }
     }
 
     #[cfg(feature = "channel-email")]
-    if let Some(ref gp_cfg) = config.channels_config.gmail_push
+    if let Some(ref gp_cfg) = config.channels.gmail_push
         && gp_cfg.enabled
     {
         channels.push(ConfiguredChannel {
@@ -4884,7 +4947,7 @@ fn collect_configured_channels(
         });
     }
 
-    if let Some(ref irc) = config.channels_config.irc {
+    if let Some(ref irc) = config.channels.irc {
         if irc.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "IRC",
@@ -4907,10 +4970,10 @@ fn collect_configured_channels(
     }
 
     #[cfg(feature = "channel-lark")]
-    if let Some(ref lk) = config.channels_config.lark {
+    if let Some(ref lk) = config.channels.lark {
         if lk.enabled {
             if lk.use_feishu {
-                if config.channels_config.feishu.is_some() {
+                if config.channels.feishu.is_some() {
                     tracing::warn!(
                         "Both [channels_config.feishu] and legacy [channels_config.lark].use_feishu=true are configured; ignoring legacy Feishu fallback in lark."
                     );
@@ -4941,7 +5004,7 @@ fn collect_configured_channels(
     }
 
     #[cfg(feature = "channel-lark")]
-    if let Some(ref fs) = config.channels_config.feishu {
+    if let Some(ref fs) = config.channels.feishu {
         if fs.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Feishu",
@@ -4956,13 +5019,34 @@ fn collect_configured_channels(
     }
 
     #[cfg(not(feature = "channel-lark"))]
-    if config.channels_config.lark.is_some() || config.channels_config.feishu.is_some() {
+    if config.channels.lark.is_some() || config.channels.feishu.is_some() {
         tracing::warn!(
             "Lark/Feishu channel is configured but this build was compiled without `channel-lark`; skipping Lark/Feishu health check."
         );
     }
 
-    if let Some(ref dt) = config.channels_config.dingtalk {
+    #[cfg(feature = "channel-line")]
+    if let Some(ref ln) = config.channels.line {
+        if ln.enabled {
+            channels.push(ConfiguredChannel {
+                display_name: "LINE",
+                channel: Arc::new(
+                    LineChannel::from_config(ln).with_transcription(config.transcription.clone()),
+                ),
+            });
+        } else {
+            tracing::info!("LINE channel configured but disabled (enabled = false)");
+        }
+    }
+
+    #[cfg(not(feature = "channel-line"))]
+    if config.channels.line.is_some() {
+        tracing::warn!(
+            "LINE channel is configured but this build was compiled without `channel-line`; skipping LINE health check."
+        );
+    }
+
+    if let Some(ref dt) = config.channels.dingtalk {
         if dt.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "DingTalk",
@@ -4980,7 +5064,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref qq) = config.channels_config.qq {
+    if let Some(ref qq) = config.channels.qq {
         if qq.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "QQ",
@@ -4999,7 +5083,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref tw) = config.channels_config.twitter {
+    if let Some(ref tw) = config.channels.twitter {
         channels.push(ConfiguredChannel {
             display_name: "X/Twitter",
             channel: Arc::new(TwitterChannel::new(
@@ -5009,7 +5093,7 @@ fn collect_configured_channels(
         });
     }
 
-    if let Some(ref mc) = config.channels_config.mochat {
+    if let Some(ref mc) = config.channels.mochat {
         channels.push(ConfiguredChannel {
             display_name: "Mochat",
             channel: Arc::new(MochatChannel::new(
@@ -5021,7 +5105,7 @@ fn collect_configured_channels(
         });
     }
 
-    if let Some(ref wc) = config.channels_config.wecom {
+    if let Some(ref wc) = config.channels.wecom {
         if wc.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "WeCom",
@@ -5035,7 +5119,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref ct) = config.channels_config.clawdtalk {
+    if let Some(ref ct) = config.channels.clawdtalk {
         if ct.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "ClawdTalk",
@@ -5074,7 +5158,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref rd) = config.channels_config.reddit {
+    if let Some(ref rd) = config.channels.reddit {
         channels.push(ConfiguredChannel {
             display_name: "Reddit",
             channel: Arc::new(RedditChannel::new(
@@ -5087,7 +5171,7 @@ fn collect_configured_channels(
         });
     }
 
-    if let Some(ref bs) = config.channels_config.bluesky {
+    if let Some(ref bs) = config.channels.bluesky {
         channels.push(ConfiguredChannel {
             display_name: "Bluesky",
             channel: Arc::new(BlueskyChannel::new(
@@ -5098,7 +5182,7 @@ fn collect_configured_channels(
     }
 
     #[cfg(feature = "voice-wake")]
-    if let Some(ref vw) = config.channels_config.voice_wake {
+    if let Some(ref vw) = config.channels.voice_wake {
         channels.push(ConfiguredChannel {
             display_name: "VoiceWake",
             channel: Arc::new(VoiceWakeChannel::new(
@@ -5108,7 +5192,19 @@ fn collect_configured_channels(
         });
     }
 
-    if let Some(ref wh) = config.channels_config.webhook {
+    #[cfg(feature = "channel-voice-call")]
+    if let Some(ref vc) = config.channels.voice_call {
+        if vc.enabled {
+            channels.push(ConfiguredChannel {
+                display_name: "Voice Call",
+                channel: Arc::new(VoiceCallChannel::new(vc.clone())),
+            });
+        } else {
+            tracing::info!("Voice Call channel configured but disabled (enabled = false)");
+        }
+    }
+
+    if let Some(ref wh) = config.channels.webhook {
         if wh.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "Webhook",
@@ -5135,7 +5231,7 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     let mut channels = collect_configured_channels(&config, "health check");
 
     #[cfg(feature = "channel-nostr")]
-    if let Some(ref ns) = config.channels_config.nostr {
+    if let Some(ref ns) = config.channels.nostr {
         channels.push(ConfiguredChannel {
             display_name: "Nostr",
             channel: Arc::new(
@@ -5180,7 +5276,7 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
         }
     }
 
-    if config.channels_config.webhook.is_some() {
+    if config.channels.webhook.is_some() {
         println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
     }
 
@@ -5198,8 +5294,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let provider: Arc<dyn Provider> = Arc::from(
         create_resilient_provider_nonblocking(
             &provider_name,
-            config.api_key.clone(),
-            config.api_url.clone(),
+            config
+                .providers
+                .fallback_provider()
+                .and_then(|e| e.api_key.clone()),
+            config
+                .providers
+                .fallback_provider()
+                .and_then(|e| e.base_url.clone()),
             config.reliability.clone(),
             provider_runtime_options.clone(),
         )
@@ -5235,13 +5337,20 @@ pub async fn start_channels(config: Config) -> Result<()> {
         &config.workspace_dir,
     ));
     let model = resolved_default_model(&config);
-    let temperature = config.default_temperature;
+    let temperature = config
+        .providers
+        .fallback_provider()
+        .and_then(|e| e.temperature)
+        .unwrap_or(0.7);
     let mem: Arc<dyn Memory> = Arc::from(zeroclaw_memory::create_memory_with_storage_and_routes(
         &config.memory,
-        &config.embedding_routes,
+        &config.providers.embedding_routes,
         Some(&config.storage.provider.config),
         &config.workspace_dir,
-        config.api_key.as_deref(),
+        config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.api_key.as_deref()),
     )?);
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
@@ -5272,7 +5381,10 @@ pub async fn start_channels(config: Config) -> Result<()> {
         &config.web_fetch,
         &workspace,
         &config.agents,
-        config.api_key.as_deref(),
+        config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.api_key.as_deref()),
         &config,
         None,
     );
@@ -5345,9 +5457,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
         }
     }
 
-    let tools_registry = Arc::new(built_tools);
-
     let skills = zeroclaw_runtime::skills::load_skills_with_config(&workspace, &config);
+
+    // Register skill-defined tools so the gateway can execute them (not just
+    // describe them in the prompt). Without this, skill tools like email.send
+    // appear in the system prompt but return "Unknown tool" when called.
+    zeroclaw_runtime::tools::register_skill_tools(&mut built_tools, &skills, security.clone());
+
+    let tools_registry = Arc::new(built_tools);
 
     // ── Load locale-aware tool descriptions ────────────────────────
     let i18n_locale = config
@@ -5486,7 +5603,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
             .collect();
 
     #[cfg(feature = "channel-nostr")]
-    if let Some(ref ns) = config.channels_config.nostr {
+    if let Some(ref ns) = config.channels.nostr {
         channels.push(Arc::new(
             NostrChannel::new(&ns.private_key, ns.relays.clone(), &ns.allowed_pubkeys).await?,
         ));
@@ -5583,29 +5700,29 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let mut provider_cache_seed: HashMap<String, Arc<dyn Provider>> = HashMap::new();
     provider_cache_seed.insert(provider_name.clone(), Arc::clone(&provider));
     let message_timeout_secs =
-        effective_channel_message_timeout_secs(config.channels_config.message_timeout_secs);
+        effective_channel_message_timeout_secs(config.channels.message_timeout_secs);
     let interrupt_on_new_message = config
-        .channels_config
+        .channels
         .telegram
         .as_ref()
         .is_some_and(|tg| tg.interrupt_on_new_message);
     let interrupt_on_new_message_slack = config
-        .channels_config
+        .channels
         .slack
         .as_ref()
         .is_some_and(|sl| sl.interrupt_on_new_message);
     let interrupt_on_new_message_discord = config
-        .channels_config
+        .channels
         .discord
         .as_ref()
         .is_some_and(|dc| dc.interrupt_on_new_message);
     let interrupt_on_new_message_mattermost = config
-        .channels_config
+        .channels
         .mattermost
         .as_ref()
         .is_some_and(|mm| mm.interrupt_on_new_message);
     let interrupt_on_new_message_matrix = config
-        .channels_config
+        .channels
         .matrix
         .as_ref()
         .is_some_and(|mx| mx.interrupt_on_new_message);
@@ -5630,8 +5747,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        api_key: config.api_key.clone(),
-        api_url: config.api_url.clone(),
+        api_key: config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.api_key.clone()),
+        api_url: config
+            .providers
+            .fallback_provider()
+            .and_then(|e| e.base_url.clone()),
         reliability: Arc::new(config.reliability.clone()),
         provider_runtime_options,
         workspace_dir: Arc::new(config.workspace_dir.clone()),
@@ -5667,11 +5790,11 @@ pub async fn start_channels(config: Config) -> Result<()> {
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
         autonomy_level: config.autonomy.level,
         tool_call_dedup_exempt: Arc::new(config.agent.tool_call_dedup_exempt.clone()),
-        model_routes: Arc::new(config.model_routes.clone()),
+        model_routes: Arc::new(config.providers.model_routes.clone()),
         query_classification: config.query_classification.clone(),
-        ack_reactions: config.channels_config.ack_reactions,
-        show_tool_calls: config.channels_config.show_tool_calls,
-        session_store: if config.channels_config.session_persistence {
+        ack_reactions: config.channels.ack_reactions,
+        show_tool_calls: config.channels.show_tool_calls,
+        session_store: if config.channels.session_persistence {
             match zeroclaw_infra::session_store::SessionStore::new(&config.workspace_dir) {
                 Ok(store) => {
                     tracing::info!("📂 Session persistence enabled");
@@ -5699,7 +5822,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         max_tool_result_chars: config.agent.max_tool_result_chars,
         context_token_budget: config.agent.max_context_tokens,
         debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
-            Duration::from_millis(config.channels_config.debounce_ms),
+            Duration::from_millis(config.channels.debounce_ms),
         )),
     });
 
@@ -5751,6 +5874,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
                 msgs.push(closure);
                 orphans_closed += 1;
             }
+            // Self-heal: strip orphaned tool_result messages left by a prior
+            // compaction that dropped the assistant tool_use without its paired
+            // tool_result. Must run LAST, after every other mutation, so any
+            // future trim step inserted above is covered by the same guard.
+            // Without this, the session is bricked until the file is deleted
+            // because every API call fails with 400 "unexpected tool_use_id
+            // in tool_result blocks". See #5813.
+            zeroclaw_runtime::agent::history_pruner::remove_orphaned_tool_messages(&mut msgs);
             hydrated += 1;
             histories.push(key, msgs);
         }
@@ -5796,7 +5927,7 @@ pub async fn deliver_announcement(
         #[cfg(feature = "channel-telegram")]
         "telegram" => {
             let tg = config
-                .channels_config
+                .channels
                 .telegram
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("telegram channel not configured"))?;
@@ -5810,7 +5941,7 @@ pub async fn deliver_announcement(
         }
         "discord" => {
             let dc = config
-                .channels_config
+                .channels
                 .discord
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("discord channel not configured"))?;
@@ -5826,15 +5957,14 @@ pub async fn deliver_announcement(
         }
         "slack" => {
             let sl = config
-                .channels_config
+                .channels
                 .slack
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("slack channel not configured"))?;
             let ch = SlackChannel::new(
                 sl.bot_token.clone(),
                 sl.app_token.clone(),
-                sl.channel_id.clone(),
-                Vec::new(),
+                sl.channel_ids.clone(),
                 sl.allowed_users.clone(),
             )
             .with_workspace_dir(config.workspace_dir.clone());
@@ -5843,7 +5973,7 @@ pub async fn deliver_announcement(
         }
         "signal" => {
             let sg = config
-                .channels_config
+                .channels
                 .signal
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("signal channel not configured"))?;
@@ -6019,6 +6149,22 @@ mod tests {
         assert!(!should_skip_memory_context_entry(
             "telegram_user_msg_201",
             "plain text without tool results"
+        ));
+
+        // Per-turn user auto-save keys must be skipped to prevent exponential
+        // context bloat from re-injected conversation history.
+        assert!(should_skip_memory_context_entry(
+            "user_msg",
+            "original user message text"
+        ));
+        assert!(should_skip_memory_context_entry(
+            "user_msg_a1b2c3d4e5f6",
+            "follow-up message embedding prior context"
+        ));
+        // Channel-scoped keys (e.g. telegram_*) must NOT be affected.
+        assert!(!should_skip_memory_context_entry(
+            "telegram_user_msg_101",
+            "Please describe the image"
         ));
     }
 
@@ -11637,7 +11783,7 @@ This is an example JSON object for profile settings."#;
     #[test]
     fn collect_configured_channels_includes_mattermost_when_configured() {
         let mut config = Config::default();
-        config.channels_config.mattermost = Some(zeroclaw_config::schema::MattermostConfig {
+        config.channels.mattermost = Some(zeroclaw_config::schema::MattermostConfig {
             enabled: true,
             url: "https://mattermost.example.com".to_string(),
             bot_token: "test-token".to_string(),
@@ -11660,6 +11806,40 @@ This is an example JSON object for profile settings."#;
             channels
                 .iter()
                 .any(|entry| entry.channel.name() == "mattermost")
+        );
+    }
+
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn collect_configured_channels_skips_disabled_email() {
+        let mut config = Config::default();
+        config.channels.email = Some(zeroclaw_config::scattered_types::EmailConfig {
+            enabled: false,
+            ..Default::default()
+        });
+
+        let channels = collect_configured_channels(&config, "test");
+        assert!(
+            !channels.iter().any(|entry| entry.display_name == "Email"),
+            "disabled email should not be collected"
+        );
+    }
+
+    #[cfg(feature = "channel-voice-call")]
+    #[test]
+    fn collect_configured_channels_skips_disabled_voice_call() {
+        let mut config = Config::default();
+        config.channels.voice_call = Some(zeroclaw_config::scattered_types::VoiceCallConfig {
+            enabled: false,
+            ..Default::default()
+        });
+
+        let channels = collect_configured_channels(&config, "test");
+        assert!(
+            !channels
+                .iter()
+                .any(|entry| entry.display_name == "Voice Call"),
+            "disabled voice-call should not be collected"
         );
     }
 
@@ -12753,7 +12933,7 @@ This is an example JSON object for profile settings."#;
     #[test]
     fn build_channel_by_id_configured_telegram_succeeds() {
         let mut config = Config::default();
-        config.channels_config.telegram = Some(zeroclaw_config::schema::TelegramConfig {
+        config.channels.telegram = Some(zeroclaw_config::schema::TelegramConfig {
             enabled: true,
             bot_token: "test-token".to_string(),
             allowed_users: vec![],
@@ -12764,10 +12944,50 @@ This is an example JSON object for profile settings."#;
             ack_reactions: None,
             direct_chat_reply_intent_precheck: true,
             proxy_url: None,
+            approval_timeout_secs: 120,
         });
         match build_channel_by_id(&config, "telegram") {
             Ok(channel) => assert_eq!(channel.name(), "telegram"),
             Err(e) => panic!("should succeed when telegram is configured: {e}"),
+        }
+    }
+
+    #[cfg(feature = "channel-voice-call")]
+    #[test]
+    fn build_channel_by_id_unconfigured_voice_call_returns_error() {
+        let config = Config::default();
+        match build_channel_by_id(&config, "voice-call") {
+            Err(e) => {
+                let err_msg = e.to_string();
+                assert!(
+                    err_msg.contains("not configured"),
+                    "expected 'not configured' in error, got: {err_msg}"
+                );
+            }
+            Ok(_) => panic!("should fail when voice-call is not configured"),
+        }
+    }
+
+    #[cfg(feature = "channel-voice-call")]
+    #[test]
+    fn build_channel_by_id_configured_voice_call_succeeds() {
+        let mut config = Config::default();
+        config.channels.voice_call = Some(zeroclaw_config::scattered_types::VoiceCallConfig {
+            enabled: true,
+            provider: zeroclaw_config::scattered_types::VoiceProvider::Twilio,
+            account_id: "AC_TEST".to_string(),
+            auth_token: "test_token".to_string(),
+            from_number: "+15551234567".to_string(),
+            webhook_port: 8090,
+            require_outbound_approval: true,
+            transcription_logging: true,
+            tts_voice: None,
+            max_call_duration_secs: 3600,
+            webhook_base_url: None,
+        });
+        match build_channel_by_id(&config, "voice-call") {
+            Ok(channel) => assert_eq!(channel.name(), "voice_call"),
+            Err(e) => panic!("should succeed when voice-call is configured: {e}"),
         }
     }
 
