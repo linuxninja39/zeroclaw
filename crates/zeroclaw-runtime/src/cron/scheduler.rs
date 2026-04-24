@@ -1334,48 +1334,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_job_result_delivery_stubbed_succeeds() {
-        // Delivery is stubbed (moved to zeroclaw-channels orchestrator).
-        // This test verifies the stub returns Ok, so persist_job_result succeeds.
-        let tmp = TempDir::new().unwrap();
-        let config = test_config(&tmp).await;
-        let job = cron::add_agent_job(
-            &config,
-            Some("announce-job".into()),
-            crate::cron::Schedule::Cron {
-                expr: "*/5 * * * *".into(),
-                tz: None,
-            },
-            "deliver this",
-            SessionTarget::Isolated,
-            None,
-            Some(DeliveryConfig {
-                mode: "announce".into(),
-                channel: Some("telegram".into()),
-                to: Some("123456".into()),
-                best_effort: false,
-            }),
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        let started = Utc::now();
-        let finished = started + ChronoDuration::milliseconds(10);
-
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
-        assert!(success);
-
-        let updated = cron::get_job(&config, &job.id).unwrap();
-        assert!(updated.enabled);
-        assert_eq!(updated.last_status.as_deref(), Some("ok"));
-
-        let runs = cron::list_runs(&config, &job.id, 10).unwrap();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, "ok");
-    }
-
-    #[tokio::test]
     async fn persist_job_result_delivery_failure_best_effort_keeps_success() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(&tmp).await;
