@@ -858,7 +858,7 @@ mod tests {
     async fn prepare_agent_job_run_applies_public_peer_route_and_identity_overlay() {
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(&tmp).await;
-        config.model_routes.push(ModelRouteConfig {
+        config.providers.model_routes.push(ModelRouteConfig {
             hint: "support".into(),
             provider: "anthropic".into(),
             model: "claude-3-7-sonnet".into(),

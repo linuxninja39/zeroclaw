@@ -99,8 +99,8 @@ pub fn add_agent_job(
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                target_public_peer, enabled, delivery, delete_after_run, allowed_tools, created_at, next_run
-             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13)",
+                enabled, delivery, delete_after_run, allowed_tools, created_at, next_run
+             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 expression,
@@ -109,7 +109,6 @@ pub fn add_agent_job(
                 name,
                 session_target.as_str(),
                 model,
-                target_public_peer,
                 serde_json::to_string(&delivery)?,
                 if delete_after_run { 1 } else { 0 },
                 encode_allowed_tools(allowed_tools.as_ref())?,
@@ -118,6 +117,7 @@ pub fn add_agent_job(
             ],
         )
         .context("Failed to insert cron agent job")?;
+        save_target_peer(conn, &id, target_public_peer.as_deref())?;
         Ok(())
     })?;
 
@@ -129,7 +129,7 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, target_public_peer, source, uses_memory
+                    allowed_tools, source, uses_memory
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -137,7 +137,9 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
 
         let mut jobs = Vec::new();
         for row in rows {
-            jobs.push(row?);
+            let mut job = row?;
+            job.target_public_peer = load_target_peer(conn, &job.id)?;
+            jobs.push(job);
         }
         Ok(jobs)
     })
@@ -148,13 +150,15 @@ pub fn get_job(config: &Config, job_id: &str) -> Result<CronJob> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, target_public_peer, source, uses_memory
+                    allowed_tools, source, uses_memory
              FROM cron_jobs WHERE id = ?1",
         )?;
 
         let mut rows = stmt.query(params![job_id])?;
         if let Some(row) = rows.next()? {
-            map_cron_job_row(row).map_err(Into::into)
+            let mut job: CronJob = map_cron_job_row(row)?;
+            job.target_public_peer = load_target_peer(conn, &job.id)?;
+            Ok(job)
         } else {
             anyhow::bail!("Cron job '{job_id}' not found")
         }
@@ -182,7 +186,7 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, target_public_peer, source, uses_memory
+                    allowed_tools, source, uses_memory
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC
@@ -194,7 +198,10 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
         let mut jobs = Vec::new();
         for row in rows {
             match row {
-                Ok(job) => jobs.push(job),
+                Ok(mut job) => {
+                    job.target_public_peer = load_target_peer(conn, &job.id)?;
+                    jobs.push(job);
+                }
                 Err(e) => tracing::warn!("Skipping cron job with unparseable row data: {e}"),
             }
         }
@@ -212,7 +219,7 @@ pub fn all_overdue_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJ
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, target_public_peer, source, uses_memory
+                    allowed_tools, source, uses_memory
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC",
@@ -223,7 +230,10 @@ pub fn all_overdue_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJ
         let mut jobs = Vec::new();
         for row in rows {
             match row {
-                Ok(job) => jobs.push(job),
+                Ok(mut job) => {
+                    job.target_public_peer = load_target_peer(conn, &job.id)?;
+                    jobs.push(job);
+                }
                 Err(e) => tracing::warn!("Skipping cron job with unparseable row data: {e}"),
             }
         }
@@ -293,9 +303,9 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
         conn.execute(
             "UPDATE cron_jobs
              SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4, prompt = ?5, name = ?6,
-                 session_target = ?7, model = ?8, target_public_peer = ?9, enabled = ?10, delivery = ?11,
-                 delete_after_run = ?12, allowed_tools = ?13, next_run = ?14, uses_memory = ?15
-             WHERE id = ?16",
+                 session_target = ?7, model = ?8, enabled = ?9, delivery = ?10,
+                 delete_after_run = ?11, allowed_tools = ?12, next_run = ?13, uses_memory = ?14
+             WHERE id = ?15",
             params![
                 job.expression,
                 job.command,
@@ -305,7 +315,6 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                 job.name,
                 job.session_target.as_str(),
                 job.model,
-                job.target_public_peer,
                 if job.enabled { 1 } else { 0 },
                 serde_json::to_string(&job.delivery)?,
                 if job.delete_after_run { 1 } else { 0 },
@@ -316,6 +325,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
             ],
         )
         .context("Failed to update cron job")?;
+        save_target_peer(conn, &job.id, job.target_public_peer.as_deref())?;
         Ok(())
     })?;
 
@@ -512,9 +522,8 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
     let last_run_raw: Option<String> = row.get(14)?;
     let created_at_raw: String = row.get(12)?;
     let allowed_tools_raw: Option<String> = row.get(17)?;
-    let target_public_peer: Option<String> = row.get(18)?;
-    let source: Option<String> = row.get(19)?;
-    let uses_memory: Option<i64> = row.get(20)?;
+    let source: Option<String> = row.get(18)?;
+    let uses_memory: Option<i64> = row.get(19)?;
 
     Ok(CronJob {
         id: row.get(0)?,
@@ -526,7 +535,7 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         name: row.get(6)?,
         session_target: SessionTarget::parse(&row.get::<_, String>(7)?),
         model: row.get(8)?,
-        target_public_peer,
+        target_public_peer: None,
         enabled: row.get::<_, i64>(9)? != 0,
         delivery,
         delete_after_run: row.get::<_, i64>(11)? != 0,
@@ -707,10 +716,10 @@ pub fn sync_declarative_jobs(
                         "UPDATE cron_jobs
                          SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4,
                              prompt = ?5, name = ?6, session_target = ?7, model = ?8,
-                             target_public_peer = ?9, enabled = ?10, delivery = ?11,
-                             delete_after_run = ?12, allowed_tools = ?13, source = 'declarative', next_run = ?14,
-                             uses_memory = ?15
-                         WHERE id = ?16",
+                             enabled = ?9, delivery = ?10,
+                             delete_after_run = ?11, allowed_tools = ?12, source = 'declarative', next_run = ?13,
+                             uses_memory = ?14
+                         WHERE id = ?15",
                         params![
                             expression,
                             command,
@@ -720,7 +729,6 @@ pub fn sync_declarative_jobs(
                             decl.name,
                             session_target,
                             decl.model,
-                            target_public_peer,
                             if decl.enabled { 1 } else { 0 },
                             delivery_json,
                             if delete_after_run { 1 } else { 0 },
@@ -738,10 +746,10 @@ pub fn sync_declarative_jobs(
                         "UPDATE cron_jobs
                          SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4,
                              prompt = ?5, name = ?6, session_target = ?7, model = ?8,
-                             target_public_peer = ?9, enabled = ?10, delivery = ?11,
-                             delete_after_run = ?12, allowed_tools = ?13, source = 'declarative',
-                             uses_memory = ?14
-                         WHERE id = ?15",
+                             enabled = ?9, delivery = ?10,
+                             delete_after_run = ?11, allowed_tools = ?12, source = 'declarative',
+                             uses_memory = ?13
+                         WHERE id = ?14",
                         params![
                             expression,
                             command,
@@ -751,7 +759,6 @@ pub fn sync_declarative_jobs(
                             decl.name,
                             session_target,
                             decl.model,
-                            target_public_peer,
                             if decl.enabled { 1 } else { 0 },
                             delivery_json,
                             if delete_after_run { 1 } else { 0 },
@@ -765,6 +772,7 @@ pub fn sync_declarative_jobs(
                     })?;
                 }
 
+                save_target_peer(conn, &decl.id, target_public_peer.as_deref())?;
                 tracing::debug!(job_id = %decl.id, "Updated declarative cron job");
             } else {
                 // Insert new declarative job.
@@ -772,9 +780,9 @@ pub fn sync_declarative_jobs(
                 conn.execute(
                     "INSERT INTO cron_jobs (
                         id, expression, command, schedule, job_type, prompt, name,
-                        session_target, model, target_public_peer, enabled, delivery, delete_after_run,
+                        session_target, model, enabled, delivery, delete_after_run,
                         allowed_tools, source, uses_memory, created_at, next_run
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'declarative', ?15, ?16, ?17)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'declarative', ?14, ?15, ?16)",
                     params![
                         decl.id,
                         expression,
@@ -785,7 +793,6 @@ pub fn sync_declarative_jobs(
                         decl.name,
                         session_target,
                         decl.model,
-                        target_public_peer,
                         if decl.enabled { 1 } else { 0 },
                         delivery_json,
                         if delete_after_run { 1 } else { 0 },
@@ -802,6 +809,7 @@ pub fn sync_declarative_jobs(
                     )
                 })?;
 
+                save_target_peer(conn, &decl.id, target_public_peer.as_deref())?;
                 tracing::info!(job_id = %decl.id, "Inserted declarative cron job from config");
             }
         }
@@ -935,7 +943,6 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
             name             TEXT,
             session_target   TEXT NOT NULL DEFAULT 'isolated',
             model            TEXT,
-            target_public_peer TEXT,
             enabled          INTEGER NOT NULL DEFAULT 1,
             delivery         TEXT,
             delete_after_run INTEGER NOT NULL DEFAULT 0,
@@ -960,7 +967,13 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
         );
         CREATE INDEX IF NOT EXISTS idx_cron_runs_job_id ON cron_runs(job_id);
         CREATE INDEX IF NOT EXISTS idx_cron_runs_started_at ON cron_runs(started_at);
-        CREATE INDEX IF NOT EXISTS idx_cron_runs_job_started ON cron_runs(job_id, started_at);",
+        CREATE INDEX IF NOT EXISTS idx_cron_runs_job_started ON cron_runs(job_id, started_at);
+
+        CREATE TABLE IF NOT EXISTS cron_job_public_peers (
+            job_id  TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL,
+            FOREIGN KEY (job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
+        );",
     )
     .context("Failed to initialize cron schema")?;
 
@@ -970,7 +983,6 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "name", "TEXT")?;
     add_column_if_missing(&conn, "session_target", "TEXT NOT NULL DEFAULT 'isolated'")?;
     add_column_if_missing(&conn, "model", "TEXT")?;
-    add_column_if_missing(&conn, "target_public_peer", "TEXT")?;
     add_column_if_missing(&conn, "enabled", "INTEGER NOT NULL DEFAULT 1")?;
     add_column_if_missing(&conn, "delivery", "TEXT")?;
     add_column_if_missing(&conn, "delete_after_run", "INTEGER NOT NULL DEFAULT 0")?;
@@ -978,7 +990,74 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "source", "TEXT DEFAULT 'imperative'")?;
     add_column_if_missing(&conn, "uses_memory", "INTEGER NOT NULL DEFAULT 1")?;
 
+    migrate_legacy_target_public_peer(&conn)?;
+
     f(&conn)
+}
+
+/// One-shot migration: if a legacy `target_public_peer` column exists on
+/// `cron_jobs` (from the pre-side-table fork schema), copy non-null values
+/// into `cron_job_public_peers` and forget the column. We keep the column
+/// in the legacy table — SQLite makes dropping columns awkward and an
+/// unused TEXT column costs nothing — but it is no longer read or written.
+fn migrate_legacy_target_public_peer(conn: &Connection) -> Result<()> {
+    let mut pragma = conn.prepare("PRAGMA table_info(cron_jobs)")?;
+    let mut rows = pragma.query([])?;
+    let mut has_legacy_column = false;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == "target_public_peer" {
+            has_legacy_column = true;
+            break;
+        }
+    }
+    drop(rows);
+    drop(pragma);
+
+    if !has_legacy_column {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO cron_job_public_peers (job_id, peer_id)
+         SELECT id, target_public_peer FROM cron_jobs
+         WHERE target_public_peer IS NOT NULL AND target_public_peer <> ''",
+        [],
+    )
+    .context("Failed to migrate legacy target_public_peer values")?;
+    Ok(())
+}
+
+fn load_target_peer(conn: &Connection, job_id: &str) -> rusqlite::Result<Option<String>> {
+    let mut stmt =
+        conn.prepare("SELECT peer_id FROM cron_job_public_peers WHERE job_id = ?1")?;
+    let mut rows = stmt.query(params![job_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn save_target_peer(conn: &Connection, job_id: &str, peer: Option<&str>) -> Result<()> {
+    match peer {
+        Some(p) => {
+            conn.execute(
+                "INSERT INTO cron_job_public_peers (job_id, peer_id) VALUES (?1, ?2)
+                 ON CONFLICT(job_id) DO UPDATE SET peer_id = excluded.peer_id",
+                params![job_id, p],
+            )
+            .context("Failed to upsert cron job public peer mapping")?;
+        }
+        None => {
+            conn.execute(
+                "DELETE FROM cron_job_public_peers WHERE job_id = ?1",
+                params![job_id],
+            )
+            .context("Failed to clear cron job public peer mapping")?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
